@@ -1,0 +1,487 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+    Connects to network devices via native OpenSSH and runs a set of commands, logging all output.
+
+.DESCRIPTION
+    Reads a list of device IPs from a text file (one IP per line), prompts for SSH credentials once,
+    reads commands from a file, then connects to each device via ssh.exe. Output is logged to
+    individual files using the naming convention: DeviceName_IPAddress_Timestamp.log
+    The device name is parsed from the SSH prompt (e.g., "Switch01#", "user@router>").
+    Failed connections are logged separately for follow-up.
+
+.PARAMETER DeviceListFile
+    Path to a text file containing one IP address per line. Blank lines and comments (#) are ignored.
+
+.PARAMETER CommandsFile
+    Path to a text file containing one command per line to execute on each device.
+
+.PARAMETER LogDirectory
+    Directory where output logs will be saved. Created automatically if it doesn't exist.
+
+.PARAMETER TimeoutSeconds
+    SSH connection timeout in seconds. Default is 10.
+
+.PARAMETER ExtraSSHOptions
+    Additional SSH options passed directly to ssh.exe for legacy or special device support.
+    Supply as an array of strings, e.g. '-o','KexAlgorithms=+diffie-hellman-group1-sha1'
+
+.EXAMPLE
+    .\Invoke-NetworkSSH.ps1
+
+    Runs with defaults: devices.txt, commands.txt, .\SSH_Logs, 10s timeout.
+
+.EXAMPLE
+    .\Invoke-NetworkSSH.ps1 -DeviceListFile .\devices.txt -CommandsFile .\commands.txt
+
+.EXAMPLE
+    .\Invoke-NetworkSSH.ps1 -LogDirectory "C:\Logs\Network" -TimeoutSeconds 15
+
+.EXAMPLE
+    .\Invoke-NetworkSSH.ps1 -ExtraSSHOptions '-o','KexAlgorithms=+diffie-hellman-group1-sha1','-o','HostKeyAlgorithms=+ssh-rsa'
+
+    A common need is for legacy devices that require older key exchange and host key algorithms.
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false, HelpMessage = "Path to file with one IP per line")]
+    [string]$DeviceListFile = ".\devices.txt",
+
+    [Parameter(Mandatory = $false, HelpMessage = "Path to file with one command per line")]
+    [string]$CommandsFile = ".\commands.txt",
+
+    [Parameter(Mandatory = $false)]
+    [string]$LogDirectory = ".\logs",
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(5, 120)]
+    [int]$TimeoutSeconds = 10,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Additional SSH options for legacy/special devices (e.g. '-o','KexAlgorithms=+diffie-hellman-group1-sha1')")]
+    [string[]]$ExtraSSHOptions = @()
+)
+
+# ---------------------------------------------
+# INITIALIZE
+# ---------------------------------------------
+$ErrorActionPreference = "Stop"
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$separator = ("=" * 59)
+$thinSep = ("-" * 40)
+
+# Validate input files exist
+if (-not (Test-Path $DeviceListFile -PathType Leaf)) {
+    Write-Error "Device list file not found: '$DeviceListFile'"
+    exit 1
+}
+if (-not (Test-Path $CommandsFile -PathType Leaf)) {
+    Write-Error "Commands file not found: '$CommandsFile'"
+    exit 1
+}
+
+# Verify ssh.exe is available
+$sshPath = Get-Command ssh.exe -ErrorAction SilentlyContinue
+if (-not $sshPath) {
+    Write-Error "ssh.exe not found in PATH. Install OpenSSH client (Windows Optional Feature) and retry."
+    exit 1
+}
+Write-Verbose "Using SSH client: $($sshPath.Source)"
+
+# Create log directory
+if (-not (Test-Path $LogDirectory)) {
+    New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+    #Write-Host "[INFO] Created log directory: $LogDirectory" -ForegroundColor Cyan
+}
+
+# Read and validate device list (skip blanks and comments)
+$devices = Get-Content $DeviceListFile |
+ForEach-Object { $_.Trim() } |
+Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
+
+if ($devices.Count -eq 0) {
+    Write-Error "No valid device IPs found in '$DeviceListFile'."
+    exit 1
+}
+#Write-Host "[INFO] Loaded $($devices.Count) device(s) from '$DeviceListFile'" -ForegroundColor Cyan
+
+# Read commands
+$commands = Get-Content $CommandsFile |
+ForEach-Object { $_.Trim() } |
+Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
+
+if ($commands.Count -eq 0) {
+    Write-Error "No valid commands found in '$CommandsFile'."
+    exit 1
+}
+#Write-Host "[INFO] Loaded $($commands.Count) command(s) from '$CommandsFile'" -ForegroundColor Cyan
+
+# Prompt for credentials (once)
+Write-Host ""
+$credential = Get-Credential -Message "Enter SSH credentials for network devices"
+$username = $credential.UserName
+$password = $credential.GetNetworkCredential().Password
+
+# ---------------------------------------------
+# SSH_ASKPASS HELPER
+# Creates a temporary script that ssh.exe calls to retrieve the password
+# so we avoid interactive password prompts per device.
+# ---------------------------------------------
+$askPassDir = Join-Path $env:TEMP "ssh_askpass_$timestamp"
+New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
+
+$askPassScript = Join-Path $askPassDir "askpass.cmd"
+Set-Content -Path $askPassScript -Value "@echo $password" -Force
+
+# ---------------------------------------------
+# HELPER FUNCTION: Parse device hostname from SSH output
+# Matches common network device prompt patterns:
+#   Cisco IOS/NX-OS  :  hostname#  hostname>  hostname(config)#
+#   Arista EOS       :  hostname#  hostname>  hostname(config)#
+#   Juniper JunOS    :  user@hostname>  user@hostname#
+#   Palo Alto        :  user@hostname>  user@hostname#
+#   HP/Aruba         :  hostname#  hostname>
+#   Linux-based NOS  :  user@hostname:~$  [user@hostname ~]$
+# ---------------------------------------------
+function Get-HostnameFromPrompt {
+    param([string]$Output)
+
+    $lines = $Output -split "`r?`n"
+
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+        # Juniper / PAN style: user@hostname> or user@hostname# or user@hostname:~$
+        if ($trimmed -match '^\S*?@([A-Za-z0-9_-]+)[>#:\$%]') {
+            return $Matches[1]
+        }
+
+        # Cisco / Arista / HP style: hostname# or hostname> or hostname(config-xxx)#
+        if ($trimmed -match '^([A-Za-z][A-Za-z0-9._-]*)(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$') {
+            $candidate = $Matches[1]
+            $falsePositives = @('yes', 'no', 'ok', 'error', 'warning', 'info', 'true', 'false')
+            if ($candidate.Length -ge 2 -and $candidate.ToLower() -notin $falsePositives) {
+                return $candidate
+            }
+        }
+
+        # Linux-style: [user@hostname ~]$ or [user@hostname ~]#
+        if ($trimmed -match '^\[?\S+?@([A-Za-z0-9_-]+)\s') {
+            return $Matches[1]
+        }
+    }
+
+    return $null
+}
+
+# ---------------------------------------------
+# HELPER FUNCTION: Sanitize strings for filenames
+# ---------------------------------------------
+function ConvertTo-SafeFileName {
+    param([string]$InputString)
+    return ($InputString -replace '[\\/:*?"<>|]', '_')
+}
+
+# ---------------------------------------------
+# HELPER FUNCTION: Run SSH session against a single device
+# ---------------------------------------------
+function Invoke-SSHSession {
+    param(
+        [string]$IPAddress,
+        [string]$User,
+        [string[]]$CommandList,
+        [int]$Timeout,
+        [string[]]$SSHOptions = @()
+    )
+
+    $result = [PSCustomObject]@{
+        IPAddress  = $IPAddress
+        DeviceName = ""
+        Status     = "Unknown"
+        LogFile    = ""
+        Error      = ""
+        Duration   = [TimeSpan]::Zero
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    try {
+        # Build ssh arguments
+        $sshArgs = @(
+            "-v",
+            "-o", "ConnectTimeout=$Timeout",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "BatchMode=no",
+            "-o", "LogLevel=ERROR"
+        )
+
+        # Append any extra SSH options (e.g. legacy KexAlgorithms, Ciphers, HostKeyAlgorithms)
+        if ($SSHOptions.Count -gt 0) {
+            $sshArgs += $SSHOptions
+        }
+
+        $sshArgs += @("-l", $User, $IPAddress)
+
+        # Prepare the command payload with 3 blank lines between each command
+        # to create clear visual separation in the device output log
+        $cmdSeparator = "`n`n`n`n"
+        $commandPayload = ($CommandList -join $cmdSeparator) + "`n"
+
+        # Configure process with SSH_ASKPASS for automated password entry
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "ssh.exe"
+        $psi.Arguments = $sshArgs -join " "
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        # Set SSH_ASKPASS environment so ssh.exe uses our helper for the password
+        $psi.EnvironmentVariables["SSH_ASKPASS"] = $askPassScript
+        $psi.EnvironmentVariables["SSH_ASKPASS_REQUIRE"] = "force"
+        $psi.EnvironmentVariables["DISPLAY"] = "localhost:0"
+
+        $proc = [System.Diagnostics.Process]::new()
+        $proc.StartInfo = $psi
+
+        # Capture output asynchronously to avoid deadlocks
+        $stdOutBuilder = [System.Text.StringBuilder]::new()
+        $stdErrBuilder = [System.Text.StringBuilder]::new()
+
+        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+            if ($null -ne $EventArgs.Data) {
+                $Event.MessageData.AppendLine($EventArgs.Data)
+            }
+        } -MessageData $stdOutBuilder
+
+        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+            if ($null -ne $EventArgs.Data) {
+                $Event.MessageData.AppendLine($EventArgs.Data)
+            }
+        } -MessageData $stdErrBuilder
+
+        $proc.Start()
+        $proc.BeginOutputReadLine()
+        $proc.BeginErrorReadLine()
+
+        # Send commands via stdin
+        $proc.StandardInput.Write($commandPayload)
+        $proc.StandardInput.Flush()
+        $proc.StandardInput.Close()
+
+        # Wait for process to finish with a generous overall timeout
+        $overallTimeoutMs = ($Timeout + 60 + ($CommandList.Count * 10)) * 1000
+        $exited = $proc.WaitForExit($overallTimeoutMs)
+
+        if (-not $exited) {
+            $proc.Kill()
+            throw "SSH session timed out after $([math]::Round($overallTimeoutMs / 1000))s (overall timeout)."
+        }
+
+        # Ensure async output events have time to flush completely
+        # WaitForExit() with no args after a timed WaitForExit() forces async stream drain
+        $proc.WaitForExit()
+        Start-Sleep -Milliseconds 500
+
+        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+
+        $stdOut = $stdOutBuilder.ToString()
+        $stdErr = $stdErrBuilder.ToString().Trim()
+
+        # Determine success or failure
+        if ($proc.ExitCode -ne 0) {
+            $result.Status = "Failed"
+            if ([string]::IsNullOrWhiteSpace($stdErr)) {
+                $result.Error = "SSH exit code $($proc.ExitCode)"
+            }
+            else {
+                # Parse each line of debug for final error output detail
+                $errorLines = $stdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                foreach ($err in $errorLines) {
+                    $result.Error = $err
+                }
+            }
+        }
+        else {
+            $result.Status = "Success"
+        }
+
+        # Parse hostname from the device prompt in captured output
+        $deviceName = Get-HostnameFromPrompt -Output $stdOut
+        if ([string]::IsNullOrWhiteSpace($deviceName)) {
+            $deviceName = "unknown"
+            Write-Verbose "Could not parse hostname from prompt for $IPAddress - using 'unknown'"
+        }
+        $result.DeviceName = $deviceName
+
+        # Build log filename now that we know the hostname
+        $safeDevice = ConvertTo-SafeFileName $deviceName
+        $safeIP = ConvertTo-SafeFileName $IPAddress
+        $logFileName = "${safeDevice}_${safeIP}_${timestamp}.log"
+        $logFilePath = Join-Path $LogDirectory $logFileName
+        $result.LogFile = $logFilePath
+
+        # Build log content using string array (avoids here-string indentation issues)
+        $logLines = @(
+            $separator
+            " Device  : $deviceName ($IPAddress)"
+            " User    : $User"
+            " Date    : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            " Status  : $($result.Status)"
+            " Timeout : ${Timeout}s"
+            $separator
+            ""
+            "$thinSep COMMANDS SENT $thinSep"
+            ($CommandList -join "`r`n")
+            ""
+            "$thinSep DEVICE OUTPUT $thinSep"
+            $stdOut
+        )
+
+        if (-not [string]::IsNullOrWhiteSpace($stdErr)) {
+            $logLines += ""
+            $logLines += "$thinSep SSH ERRORS / DIAGNOSTICS $thinSep"
+            $logLines += $stdErr
+        }
+
+        Set-Content -Path $logFilePath -Value ($logLines -join "`r`n") -Encoding UTF8
+    }
+    catch {
+        $result.Status = "Failed"
+        $result.Error = $_.Exception.Message
+        $result.DeviceName = "unknown"
+
+        # Still write a failure log
+        $safeIP = ConvertTo-SafeFileName $IPAddress
+        $logFileName = "unknown_${safeIP}_${timestamp}.log"
+        $logFilePath = Join-Path $LogDirectory $logFileName
+        $result.LogFile = $logFilePath
+
+        $failLines = @(
+            $separator
+            " Device  : unknown ($IPAddress)"
+            " User    : $User"
+            " Date    : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            " Status  : FAILED"
+            " Timeout : ${Timeout}s"
+            $separator
+            ""
+            "ERROR: $($_.Exception.Message)"
+        )
+
+        Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
+    }
+    finally {
+        $sw.Stop()
+        $result.Duration = $sw.Elapsed
+
+        try {
+            if ($null -ne $proc) {
+                if (-not $proc.HasExited) { $proc.Kill() }
+                $proc.Dispose()
+            }
+        }
+        catch {
+            Write-Verbose "Process cleanup for $IPAddress : $($_.Exception.Message)"
+        }
+    }
+
+    return $result
+}
+
+# ---------------------------------------------
+# MAIN EXECUTION LOOP
+# ---------------------------------------------
+$devCountStr = "$($devices.Count)".PadRight(37)
+$cmdCountStr = "$($commands.Count)".PadRight(37)
+$timeoutStr = "${TimeoutSeconds}s".PadRight(37)
+$logDirStr = $LogDirectory
+if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
+$logDirStr = $logDirStr.PadRight(37)
+
+Write-Host ""
+Write-Host "+==================================================+" -ForegroundColor Green
+Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Green
+Write-Host "+==================================================+" -ForegroundColor Green
+Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Green
+Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Green
+Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Green
+Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Green
+if ($ExtraSSHOptions.Count -gt 0) {
+    $sshOptsStr = ($ExtraSSHOptions -join " ")
+    if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
+    $sshOptsStr = $sshOptsStr.PadRight(37)
+    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Green
+}
+Write-Host "+==================================================+" -ForegroundColor Green
+Write-Host ""
+
+$results = [System.Collections.Generic.List[PSCustomObject]]::new()
+$deviceNum = 0
+
+foreach ($ip in $devices) {
+    $deviceNum++
+    Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ... " -NoNewline
+
+    $sessionResult = Invoke-SSHSession `
+        -IPAddress   $ip `
+        -User        $username `
+        -CommandList $commands `
+        -Timeout     $TimeoutSeconds `
+        -SSHOptions  $ExtraSSHOptions
+
+    if ($sessionResult.Status -eq "Success") {
+        Write-Host "OK " -ForegroundColor Green -NoNewline
+        Write-Host "($($sessionResult.DeviceName)) [$($sessionResult.Duration.TotalSeconds.ToString('0.0'))s]"
+    }
+    else {
+        Write-Host "FAILED: " -ForegroundColor Red -NoNewline
+        Write-Host "$($sessionResult.Error)" -ForegroundColor DarkRed
+    }
+
+    $results.Add($sessionResult)
+}
+
+# ---------------------------------------------
+# SUMMARY REPORT
+# ---------------------------------------------
+$successCount = @($results | Where-Object { $_.Status -eq "Success" }).Count
+$failCount = @($results | Where-Object { $_.Status -ne "Success" }).Count
+$failColor = if ($failCount -gt 0) { "Red" } else { "Green" }
+
+$totalStr = "$($results.Count)".PadRight(36)
+$successStr = "$successCount".PadRight(36)
+$failStr = "$failCount".PadRight(36)
+
+Write-Host ""
+Write-Host "+==================================================+" -ForegroundColor Gray
+Write-Host "|                     SUMMARY                      |" -ForegroundColor Gray
+Write-Host "+==================================================+" -ForegroundColor Gray
+Write-Host "|  Total     : ${totalStr}|" -ForegroundColor Gray
+Write-Host "|  Succeeded : " -NoNewline
+Write-Host "${successStr}" -ForegroundColor Green -NoNewline
+Write-Host "|"
+Write-Host "|  Failed    : " -NoNewline
+Write-Host "${failStr}" -ForegroundColor $failColor -NoNewline
+Write-Host "|"
+Write-Host "+==================================================+" -ForegroundColor Gray
+
+# ---------------------------------------------
+# CLEANUP - Remove askpass helper securely
+# ---------------------------------------------
+try {
+    Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Verbose "Cleaned up SSH_ASKPASS helper."
+}
+catch {
+    Write-Warning "Could not remove temporary askpass script at '$askPassDir'. Please delete manually."
+}
+
+# Clear password from memory
+$password = $null
+[System.GC]::Collect()

@@ -1,0 +1,10 @@
+term len 0
+show run
+show switch
+show version
+show inventory
+show power inline
+show interface status
+show cdp neighbor
+show lldp neighbor
+show log

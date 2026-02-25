@@ -1,0 +1,6 @@
+# Ignore log directory
+logs/
+
+#Ignore common input file names
+commands.txt
+devices.txt
