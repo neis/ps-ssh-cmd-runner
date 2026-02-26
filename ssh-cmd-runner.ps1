@@ -75,7 +75,10 @@ param(
 
     [Parameter(Mandatory = $false, HelpMessage = "Delay in milliseconds between sending each command to the device (default 500)")]
     [ValidateRange(100, 10000)]
-    [int]$CommandDelayMs = 500
+    [int]$CommandDelayMs = 500,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Directory where the JSON output file will be saved. Created automatically if it doesn't exist.")]
+    [string]$JsonDirectory = ".\json"
 )
 
 # ---------------------------------------------
@@ -83,6 +86,7 @@ param(
 # ---------------------------------------------
 $ErrorActionPreference = "Stop"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$runDate   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $separator = ("=" * 59)
 $thinSep = ("-" * 40)
 
@@ -108,6 +112,11 @@ Write-Verbose "Using SSH client: $($sshPath.Source)"
 if (-not (Test-Path $LogDirectory)) {
     New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
     #Write-Host "[INFO] Created log directory: $LogDirectory" -ForegroundColor Cyan
+}
+
+# Create JSON output directory
+if (-not (Test-Path $JsonDirectory)) {
+    New-Item -ItemType Directory -Path $JsonDirectory -Force | Out-Null
 }
 
 # Read and validate device list (skip blanks and comments)
@@ -267,12 +276,14 @@ function Invoke-SSHSession {
     )
 
     $result = [PSCustomObject]@{
-        IPAddress  = $IPAddress
-        DeviceName = ""
-        Status     = "Unknown"
-        LogFile    = ""
-        Error      = ""
-        Duration   = [TimeSpan]::Zero
+        IPAddress      = $IPAddress
+        DeviceName     = ""
+        Status         = "Unknown"
+        LogFile        = ""
+        Error          = ""
+        Duration       = [TimeSpan]::Zero
+        Timestamp      = ""   # completion timestamp, set in finally block
+        CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -445,11 +456,28 @@ function Invoke-SSHSession {
             }
             $stdOutBuilder.AppendLine("$lastPrompt$echoLine") | Out-Null
 
+            # Use a dedicated per-command builder for structured JSON output capture.
+            # $stdOutBuilder continues to receive the formatted log content unchanged.
+            $cmdOutputBuilder = [System.Text.StringBuilder]::new()
+
             $lastPrompt = ""
-            if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
+            if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
                 $proc.Kill()
                 throw "Timed out waiting for device prompt after command '$cmd'."
             }
+
+            # Forward the per-command output into $stdOutBuilder so the log file
+            # format is completely unchanged.
+            $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
+
+            # Split the per-command output into an array of strings for JSON.
+            # Each array element is one output line; blank lines become empty strings,
+            # matching the raw_output format in the example JSON.
+            $rawLines = $cmdOutputBuilder.ToString() -split "`r?`n"
+            $result.CommandResults.Add([PSCustomObject]@{
+                command    = $cmd
+                raw_output = [string[]]$rawLines
+            })
 
             # Repeat the prompt twice as visual separators between command blocks.
             # Using the actual prompt (rather than blank lines) means every non-blank
@@ -575,7 +603,8 @@ function Invoke-SSHSession {
     }
     finally {
         $sw.Stop()
-        $result.Duration = $sw.Elapsed
+        $result.Duration  = $sw.Elapsed
+        $result.Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
         try {
             if ($null -ne $proc) {
@@ -651,6 +680,56 @@ foreach ($ip in $devices) {
 
     $results.Add($sessionResult)
 }
+
+# ---------------------------------------------
+# JSON OUTPUT
+# ---------------------------------------------
+$successResults = @($results | Where-Object { $_.Status -eq "Success" })
+$failedIPs      = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
+
+$jsonDoc = [ordered]@{
+    summary = [ordered]@{
+        platform = "Windows"
+        date     = $runDate
+        result   = [ordered]@{
+            total   = $results.Count
+            success = $successResults.Count
+            failed  = $failedIPs.Count
+        }
+        devices  = [ordered]@{
+            count               = $results.Count
+            ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
+            failed_ip_addresses = @($failedIPs)
+        }
+        commands = [ordered]@{
+            count = $commands.Count
+            list  = @($commands)
+        }
+    }
+    devices  = @(
+        $successResults | ForEach-Object {
+            $dev = $_
+            [ordered]@{
+                name      = $dev.DeviceName
+                ip        = $dev.IPAddress
+                timestamp = $dev.Timestamp
+                commands  = @(
+                    $dev.CommandResults | ForEach-Object {
+                        [ordered]@{
+                            command    = $_.command
+                            raw_output = @($_.raw_output)
+                        }
+                    }
+                )
+            }
+        }
+    )
+}
+
+$jsonPath = Join-Path $JsonDirectory "output.json"
+$jsonDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
+Write-Host ""
+Write-Host "JSON output: $jsonPath" -ForegroundColor Cyan
 
 # ---------------------------------------------
 # SUMMARY REPORT

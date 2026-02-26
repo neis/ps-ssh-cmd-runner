@@ -43,6 +43,61 @@ The prompt is written alone (without a command) twice between each command block
 every non-blank line is either a prompt, a command echo, or device output, the log is
 straightforward to parse programmatically.
 
+## JSON OUTPUT
+
+In addition to the per-device `.log` files, the script writes a single `output.json` file
+to the JSON directory (default: `.\json\output.json`) after all devices have been processed.
+The file is overwritten on every run.
+
+### Structure
+
+```json
+{
+  "summary": {
+    "platform": "Windows",
+    "date": "2026-02-26 15:36:18",
+    "result": { "total": 2, "success": 1, "failed": 1 },
+    "devices": {
+      "count": 2,
+      "ip_addresses": ["10.1.50.1", "10.1.50.2"],
+      "failed_ip_addresses": ["10.1.50.1"]
+    },
+    "commands": {
+      "count": 3,
+      "list": ["term len 0", "show switch", "show inventory"]
+    }
+  },
+  "devices": [
+    {
+      "name": "s3850x-1",
+      "ip": "10.1.50.2",
+      "timestamp": "2026-02-26 15:36:48",
+      "commands": [
+        {
+          "command": "show inventory",
+          "raw_output": [
+            "NAME: \"c38xx Stack\", DESCR: \"c38xx Stack\"",
+            "PID: WS-C3850-48F-L    , VID: V07  , SN: FCW2046F0PD",
+            ""
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Key details
+
+- Only **successfully connected** devices appear in the `devices` array. Devices that
+  failed to connect are listed in `summary.devices.failed_ip_addresses`.
+- Each command's output is stored as **an array of strings** (`raw_output`), one element
+  per output line. Blank lines are preserved as empty strings `""`.
+- **Double-quotes** within device output (e.g. `NAME: "Switch 1"`) are automatically
+  escaped as `\"` by `ConvertTo-Json` — no manual handling is required.
+- The `summary.date` reflects the run start time; per-device `timestamp` reflects the
+  completion time of that device's session.
+
 ## REQUIREMENTS
 
 - Windows PowerShell 5.1 or later
@@ -72,6 +127,11 @@ Delay in milliseconds to wait after receiving the device prompt before sending t
 command. Useful for slower devices or commands that produce large output where the prompt
 may appear before the output buffer is fully flushed. Valid range: 100–10000. Default: `500`
 
+**JsonDirectory** `[string]`
+Directory where `output.json` will be written. Created automatically if it does not exist.
+The file is always named `output.json` and is overwritten on every run.
+Default: `.\json`
+
 **ExtraSSHOptions** `[string[]]`
 Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly
 used for legacy devices that require older key exchange or cipher algorithms.
@@ -93,6 +153,10 @@ Write logs to a custom directory with a longer timeout:
 Add a 1-second delay between commands for slower devices or large output:
 
     .\ssh-cmd-runner.ps1 -CommandDelayMs 1000
+
+Write JSON output to a custom directory:
+
+    .\ssh-cmd-runner.ps1 -JsonDirectory "C:\Data\NetworkJSON"
 
 Connect to legacy devices requiring older SSH algorithms:
 
