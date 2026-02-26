@@ -86,7 +86,7 @@ param(
 # ---------------------------------------------
 $ErrorActionPreference = "Stop"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$runDate   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$runDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $separator = ("=" * 59)
 $thinSep = ("-" * 40)
 
@@ -365,41 +365,41 @@ function Invoke-SSHSession {
         # Single-element array shared with the reader runspace as a mutable regex slot.
         # The outer scope overwrites [0] once the device hostname is known; the runspace
         # reads it on every character iteration. String reference assignment is atomic in .NET.
-        $regexHolder    = [string[]]::new(1)
+        $regexHolder = [string[]]::new(1)
         $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$'
 
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
-            param($reader, $queue, $holder)
-            try {
-                $buf = [System.Text.StringBuilder]::new()
-                while ($true) {
-                    $c = $reader.Read()       # blocks until a char is available or EOS
-                    if ($c -eq -1) { break }  # end of stream
-                    $ch = [char]$c
-                    if ($ch -eq "`r") { continue }   # discard bare CR
-                    if ($ch -eq "`n") {
-                        $queue.Enqueue($buf.ToString())
-                        $buf.Clear() | Out-Null
-                    }
-                    else {
-                        $buf.Append($ch) | Out-Null
-                        $s = $buf.ToString()
-                        # Flush when the buffer matches the current prompt pattern.
-                        # After the hostname is discovered the outer scope writes a
-                        # tighter hostname-anchored pattern into $holder[0], preventing
-                        # table column headers (e.g. "Switch#") from being flushed.
-                        if ($s -match $holder[0]) {
-                            $queue.Enqueue($s)
+                param($reader, $queue, $holder)
+                try {
+                    $buf = [System.Text.StringBuilder]::new()
+                    while ($true) {
+                        $c = $reader.Read()       # blocks until a char is available or EOS
+                        if ($c -eq -1) { break }  # end of stream
+                        $ch = [char]$c
+                        if ($ch -eq "`r") { continue }   # discard bare CR
+                        if ($ch -eq "`n") {
+                            $queue.Enqueue($buf.ToString())
                             $buf.Clear() | Out-Null
                         }
+                        else {
+                            $buf.Append($ch) | Out-Null
+                            $s = $buf.ToString()
+                            # Flush when the buffer matches the current prompt pattern.
+                            # After the hostname is discovered the outer scope writes a
+                            # tighter hostname-anchored pattern into $holder[0], preventing
+                            # table column headers (e.g. "Switch#") from being flushed.
+                            if ($s -match $holder[0]) {
+                                $queue.Enqueue($s)
+                                $buf.Clear() | Out-Null
+                            }
+                        }
                     }
+                    if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
                 }
-                if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
-            }
-            catch { }
-            finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
-        }).AddArgument($proc.StandardOutput).AddArgument($lineQueue).AddArgument($regexHolder) | Out-Null
+                catch { }
+                finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
+            }).AddArgument($proc.StandardOutput).AddArgument($lineQueue).AddArgument($regexHolder) | Out-Null
         $readerHandle = $readerRunspace.BeginInvoke()
 
         # Wait for the initial device prompt before sending any commands.
@@ -475,9 +475,9 @@ function Invoke-SSHSession {
             # matching the raw_output format in the example JSON.
             $rawLines = $cmdOutputBuilder.ToString() -split "`r?`n"
             $result.CommandResults.Add([PSCustomObject]@{
-                command    = $cmd
-                raw_output = [string[]]$rawLines
-            })
+                    command    = $cmd
+                    raw_output = [string[]]$rawLines
+                })
 
             # Repeat the prompt twice as visual separators between command blocks.
             # Using the actual prompt (rather than blank lines) means every non-blank
@@ -603,7 +603,7 @@ function Invoke-SSHSession {
     }
     finally {
         $sw.Stop()
-        $result.Duration  = $sw.Elapsed
+        $result.Duration = $sw.Elapsed
         $result.Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
         try {
@@ -638,20 +638,20 @@ if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..."
 $logDirStr = $logDirStr.PadRight(37)
 
 Write-Host ""
-Write-Host "+==================================================+" -ForegroundColor Green
-Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Green
-Write-Host "+==================================================+" -ForegroundColor Green
-Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Green
-Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Green
-Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Green
-Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Green
+Write-Host "+==================================================+" -ForegroundColor Gray
+Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Gray
+Write-Host "+==================================================+" -ForegroundColor Gray
+Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
+Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
+Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
+Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
 if ($ExtraSSHOptions.Count -gt 0) {
     $sshOptsStr = ($ExtraSSHOptions -join " ")
     if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
     $sshOptsStr = $sshOptsStr.PadRight(37)
-    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Green
+    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Gray
 }
-Write-Host "+==================================================+" -ForegroundColor Green
+Write-Host "+==================================================+" -ForegroundColor Gray
 Write-Host ""
 
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -685,7 +685,7 @@ foreach ($ip in $devices) {
 # JSON OUTPUT
 # ---------------------------------------------
 $successResults = @($results | Where-Object { $_.Status -eq "Success" })
-$failedIPs      = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
+$failedIPs = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
 
 $jsonDoc = [ordered]@{
     summary = [ordered]@{
@@ -706,7 +706,7 @@ $jsonDoc = [ordered]@{
             list  = @($commands)
         }
     }
-    devices  = @(
+    devices = @(
         $successResults | ForEach-Object {
             $dev = $_
             [ordered]@{
