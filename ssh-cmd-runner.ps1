@@ -353,35 +353,35 @@ function Invoke-SSHSession {
         $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
-            param($reader, $queue)
-            try {
-                $buf = [System.Text.StringBuilder]::new()
-                while ($true) {
-                    $c = $reader.Read()       # blocks until a char is available or EOS
-                    if ($c -eq -1) { break }  # end of stream
-                    $ch = [char]$c
-                    if ($ch -eq "`r") { continue }   # discard bare CR
-                    if ($ch -eq "`n") {
-                        $queue.Enqueue($buf.ToString())
-                        $buf.Clear() | Out-Null
-                    }
-                    else {
-                        $buf.Append($ch) | Out-Null
-                        $s = $buf.ToString()
-                        # Flush when the buffer matches a device prompt.
-                        # Requires a hostname-start character before # or > to
-                        # prevent pager strings (e.g. "--More--") from matching.
-                        if ($s -match '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$') {
-                            $queue.Enqueue($s)
+                param($reader, $queue)
+                try {
+                    $buf = [System.Text.StringBuilder]::new()
+                    while ($true) {
+                        $c = $reader.Read()       # blocks until a char is available or EOS
+                        if ($c -eq -1) { break }  # end of stream
+                        $ch = [char]$c
+                        if ($ch -eq "`r") { continue }   # discard bare CR
+                        if ($ch -eq "`n") {
+                            $queue.Enqueue($buf.ToString())
                             $buf.Clear() | Out-Null
                         }
+                        else {
+                            $buf.Append($ch) | Out-Null
+                            $s = $buf.ToString()
+                            # Flush when the buffer matches a device prompt.
+                            # Requires a hostname-start character before # or > to
+                            # prevent pager strings (e.g. "--More--") from matching.
+                            if ($s -match '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$') {
+                                $queue.Enqueue($s)
+                                $buf.Clear() | Out-Null
+                            }
+                        }
                     }
+                    if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
                 }
-                if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
-            }
-            catch { }
-            finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
-        }).AddArgument($proc.StandardOutput).AddArgument($lineQueue) | Out-Null
+                catch { }
+                finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
+            }).AddArgument($proc.StandardOutput).AddArgument($lineQueue) | Out-Null
         $readerHandle = $readerRunspace.BeginInvoke()
 
         # Wait for the initial device prompt before sending any commands.
@@ -580,20 +580,20 @@ if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..."
 $logDirStr = $logDirStr.PadRight(37)
 
 Write-Host ""
-Write-Host "+==================================================+" -ForegroundColor Green
-Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Green
-Write-Host "+==================================================+" -ForegroundColor Green
-Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Green
-Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Green
-Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Green
-Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Green
+Write-Host "+==================================================+" -ForegroundColor Gray
+Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Gray
+Write-Host "+==================================================+" -ForegroundColor Gray
+Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
+Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
+Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
+Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
 if ($ExtraSSHOptions.Count -gt 0) {
     $sshOptsStr = ($ExtraSSHOptions -join " ")
     if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
     $sshOptsStr = $sshOptsStr.PadRight(37)
-    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Green
+    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Gray
 }
-Write-Host "+==================================================+" -ForegroundColor Green
+Write-Host "+==================================================+" -ForegroundColor Gray
 Write-Host ""
 
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -628,7 +628,7 @@ foreach ($ip in $devices) {
 # ---------------------------------------------
 $successCount = @($results | Where-Object { $_.Status -eq "Success" }).Count
 $failCount = @($results | Where-Object { $_.Status -ne "Success" }).Count
-$failColor = if ($failCount -gt 0) { "Red" } else { "Green" }
+$failColor = if ($failCount -gt 0) { "Red" } else { "Gray" }
 
 $totalStr = "$($results.Count)".PadRight(36)
 $successStr = "$successCount".PadRight(36)
