@@ -7,7 +7,7 @@
 .DESCRIPTION
     Reads a list of device IPs from a text file (one IP per line), prompts for SSH credentials once,
     reads commands from a file, then connects to each device via ssh.exe. Output is logged to
-    individual files using the naming convention: DeviceName_IPAddress_Timestamp.log
+    individual files using the naming convention: DeviceName_IPAddress_Timestamp.log.
     The device name is parsed from the SSH prompt (e.g., "Switch01#", "user@router>").
     Failed connections are logged separately for follow-up.
 
@@ -27,6 +27,12 @@
     Additional SSH options passed directly to ssh.exe for legacy or special device support.
     Supply as an array of strings, e.g. '-o','KexAlgorithms=+diffie-hellman-group1-sha1'
 
+.PARAMETER CommandDelayMs
+    Delay in milliseconds between sending each command to the device.
+    Prevents output interleaving caused by commands arriving faster than
+    the device can process them. *Default is 0ms*. Increase for slower
+    devices or commands that produce large output.
+
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
 
@@ -42,6 +48,11 @@
     .\Invoke-NetworkSSH.ps1 -ExtraSSHOptions '-o','KexAlgorithms=+diffie-hellman-group1-sha1','-o','HostKeyAlgorithms=+ssh-rsa'
 
     A common need is for legacy devices that require older key exchange and host key algorithms.
+
+.EXAMPLE
+    .\Invoke-NetworkSSH.ps1 -CommandDelayMs 1000
+
+    Uses a 1-second delay between commands for slower devices or large output.
 #>
 
 [CmdletBinding()]
@@ -60,7 +71,11 @@ param(
     [int]$TimeoutSeconds = 10,
 
     [Parameter(Mandatory = $false, HelpMessage = "Additional SSH options for legacy/special devices (e.g. '-o','KexAlgorithms=+diffie-hellman-group1-sha1')")]
-    [string[]]$ExtraSSHOptions = @()
+    [string[]]$ExtraSSHOptions = @(),
+
+    [Parameter(Mandatory = $false, HelpMessage = "Delay in milliseconds between sending each command to the device (default 500)")]
+    [ValidateRange(100, 10000)]
+    [int]$CommandDelayMs = 0
 )
 
 # ---------------------------------------------
@@ -206,7 +221,8 @@ function Invoke-SSHSession {
         [string]$User,
         [string[]]$CommandList,
         [int]$Timeout,
-        [string[]]$SSHOptions = @()
+        [string[]]$SSHOptions = @(),
+        [int]$CmdDelayMs = 500
     )
 
     $result = [PSCustomObject]@{
@@ -224,6 +240,7 @@ function Invoke-SSHSession {
         # Build ssh arguments
         $sshArgs = @(
             "-v",
+            "-tt",
             "-o", "ConnectTimeout=$Timeout",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -240,8 +257,8 @@ function Invoke-SSHSession {
 
         # Prepare the command payload with 3 blank lines between each command
         # to create clear visual separation in the device output log
-        $cmdSeparator = "`n`n`n`n"
-        $commandPayload = ($CommandList -join $cmdSeparator) + "`n"
+        #$cmdSeparator = "`n`n`n`n"
+        #$commandPayload = ($CommandList -join $cmdSeparator) + "`n"
 
         # Configure process with SSH_ASKPASS for automated password entry
         $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -282,12 +299,25 @@ function Invoke-SSHSession {
         $proc.BeginErrorReadLine()
 
         # Send commands via stdin
-        $proc.StandardInput.Write($commandPayload)
-        $proc.StandardInput.Flush()
+        #$proc.StandardInput.Write($commandPayload)
+        #$proc.StandardInput.Flush()
+        #$proc.StandardInput.Close()
+        foreach ($cmd in $CommandList) {
+            $proc.StandardInput.WriteLine($cmd)
+            $proc.StandardInput.Flush()
+            Start-Sleep -Milliseconds $CmdDelayMs
+            # Trailing blank lines for final output
+            $proc.StandardInput.WriteLine("")
+            $proc.StandardInput.WriteLine("")
+            $proc.StandardInput.WriteLine("")
+            $proc.StandardInput.Flush()
+        }
         $proc.StandardInput.Close()
 
         # Wait for process to finish with a generous overall timeout
-        $overallTimeoutMs = ($Timeout + 60 + ($CommandList.Count * 10)) * 1000
+        #$overallTimeoutMs = ($Timeout + 60 + ($CommandList.Count * 10)) * 1000
+        $totalCmdDelayMs = $CommandList.Count * $CmdDelayMs
+        $overallTimeoutMs = (($Timeout + 60) * 1000) + $totalCmdDelayMs
         $exited = $proc.WaitForExit($overallTimeoutMs)
 
         if (-not $exited) {
@@ -446,7 +476,8 @@ foreach ($ip in $devices) {
         -User        $username `
         -CommandList $commands `
         -Timeout     $TimeoutSeconds `
-        -SSHOptions  $ExtraSSHOptions
+        -SSHOptions  $ExtraSSHOptions `
+        -CmdDelayMs  $CommandDelayMs
 
     if ($sessionResult.Status -eq "Success") {
         Write-Host "OK " -ForegroundColor Green -NoNewline
