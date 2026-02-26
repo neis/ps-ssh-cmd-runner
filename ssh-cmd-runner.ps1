@@ -123,6 +123,19 @@ $credential = Get-Credential -Message "Enter SSH credentials for network devices
 $username = $credential.UserName
 $password = $credential.GetNetworkCredential().Password
 
+# Escape characters that cmd.exe treats as special operators.
+# Without this, passwords containing & | < > ^ % ! will be
+# misinterpreted by the command shell when the askpass helper runs.
+# Caret (^) must be escaped first to avoid double-escaping the others.
+$escapedPassword = $password
+$escapedPassword = $escapedPassword.Replace('^', '^^')
+$escapedPassword = $escapedPassword.Replace('&', '^&')
+$escapedPassword = $escapedPassword.Replace('|', '^|')
+$escapedPassword = $escapedPassword.Replace('<', '^<')
+$escapedPassword = $escapedPassword.Replace('>', '^>')
+$escapedPassword = $escapedPassword.Replace('!', '^!')
+$escapedPassword = $escapedPassword.Replace('%', '%%')
+
 # ---------------------------------------------
 # SSH_ASKPASS HELPER
 # Creates a temporary script that ssh.exe calls to retrieve the password
@@ -132,7 +145,7 @@ $askPassDir = Join-Path $env:TEMP "ssh_askpass_$timestamp"
 New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
 
 $askPassScript = Join-Path $askPassDir "askpass.cmd"
-Set-Content -Path $askPassScript -Value "@echo $password" -Force
+Set-Content -Path $askPassScript -Value "@echo $escapedPassword" -Force
 
 # ---------------------------------------------
 # HELPER FUNCTION: Parse device hostname from SSH output
