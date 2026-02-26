@@ -1,5 +1,6 @@
-# Ignore log directory
+# Ignore output directories
 logs/
+json/
 
 # Ignore common input file names
 commands.txt
