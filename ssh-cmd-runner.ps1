@@ -75,7 +75,7 @@ param(
 
     [Parameter(Mandatory = $false, HelpMessage = "Delay in milliseconds between sending each command to the device (default 500)")]
     [ValidateRange(100, 10000)]
-    [int]$CommandDelayMs = 0
+    [int]$CommandDelayMs = 500
 )
 
 # ---------------------------------------------
@@ -213,6 +213,47 @@ function ConvertTo-SafeFileName {
 }
 
 # ---------------------------------------------
+# HELPER FUNCTION: Read stdout lines from a ConcurrentQueue until a device
+# CLI prompt is detected or the timeout expires.
+# Returns $true if a prompt was found, $false if the call timed out.
+# When a prompt is found it is NOT written to Builder — instead it is returned
+# via the [ref] $PromptText parameter so the caller can join it with the
+# echoed command that follows, reproducing the natural "hostname#command" layout.
+# ---------------------------------------------
+function Read-UntilPrompt {
+    param(
+        [System.Collections.Concurrent.ConcurrentQueue[string]]$Queue,
+        [System.Text.StringBuilder]$Builder,
+        [System.Text.RegularExpressions.Regex]$PromptRegex,
+        [int]$TimeoutMs,
+        [ref]$PromptText
+    )
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    $line = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($Queue.TryDequeue([ref]$line)) {
+            if ($null -eq $line) {
+                # Null sentinel: stream closed. Treat as prompt-found so the
+                # caller doesn't hang, but leave PromptText empty.
+                if ($null -ne $PromptText) { $PromptText.Value = "" }
+                return $true
+            }
+            if ($PromptRegex.IsMatch($line.TrimEnd())) {
+                # Hold the prompt — do NOT append it to Builder yet.
+                # The caller will prepend it to the echoed command line.
+                if ($null -ne $PromptText) { $PromptText.Value = $line.TrimEnd() }
+                return $true
+            }
+            $Builder.AppendLine($line) | Out-Null
+        }
+        else {
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    return $false
+}
+
+# ---------------------------------------------
 # HELPER FUNCTION: Run SSH session against a single device
 # ---------------------------------------------
 function Invoke-SSHSession {
@@ -240,7 +281,7 @@ function Invoke-SSHSession {
         # Build ssh arguments
         $sshArgs = @(
             "-v",
-            "-tt",
+            "-T",
             "-o", "ConnectTimeout=$Timeout",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -255,11 +296,6 @@ function Invoke-SSHSession {
 
         $sshArgs += @("-l", $User, $IPAddress)
 
-        # Prepare the command payload with 3 blank lines between each command
-        # to create clear visual separation in the device output log
-        #$cmdSeparator = "`n`n`n`n"
-        #$commandPayload = ($CommandList -join $cmdSeparator) + "`n"
-
         # Configure process with SSH_ASKPASS for automated password entry
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = "ssh.exe"
@@ -269,6 +305,7 @@ function Invoke-SSHSession {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.CreateNoWindow = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
 
         # Set SSH_ASKPASS environment so ssh.exe uses our helper for the password
         $psi.EnvironmentVariables["SSH_ASKPASS"] = $askPassScript
@@ -278,16 +315,10 @@ function Invoke-SSHSession {
         $proc = [System.Diagnostics.Process]::new()
         $proc.StartInfo = $psi
 
-        # Capture output asynchronously to avoid deadlocks
         $stdOutBuilder = [System.Text.StringBuilder]::new()
         $stdErrBuilder = [System.Text.StringBuilder]::new()
 
-        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
-            if ($null -ne $EventArgs.Data) {
-                $Event.MessageData.AppendLine($EventArgs.Data)
-            }
-        } -MessageData $stdOutBuilder
-
+        # Stderr stays on async events (SSH diagnostics — ordering doesn't matter)
         $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
             if ($null -ne $EventArgs.Data) {
                 $Event.MessageData.AppendLine($EventArgs.Data)
@@ -295,29 +326,125 @@ function Invoke-SSHSession {
         } -MessageData $stdErrBuilder
 
         $proc.Start()
-        $proc.BeginOutputReadLine()
         $proc.BeginErrorReadLine()
 
-        # Send commands via stdin
-        #$proc.StandardInput.Write($commandPayload)
-        #$proc.StandardInput.Flush()
-        #$proc.StandardInput.Close()
+        # Windows StreamWriter defaults to \r\n line endings. Cisco IOS treats the
+        # bare \r as a second Enter press on an empty line. Over multiple commands
+        # this causes IOS to close the session early. Force LF-only line endings
+        # to match what a Unix SSH client sends.
+        $proc.StandardInput.NewLine = "`n"
+
+        # Stdout is read synchronously via a background runspace + ConcurrentQueue.
+        # This avoids the race condition where async OutputDataReceived events fire
+        # on a background thread while new commands are already being written to stdin,
+        # causing output lines to be recorded out of order.
+        # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
+        # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
+        $promptRegex = [System.Text.RegularExpressions.Regex]::new(
+            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)',
+            [System.Text.RegularExpressions.RegexOptions]::Compiled
+        )
+        # Cisco IOS sends the prompt without a trailing newline even without a PTY,
+        # so ReadLine() would block indefinitely on the prompt line. The runspace
+        # reads one character at a time and flushes to the queue on every newline
+        # AND whenever the accumulated buffer matches a device prompt pattern.
+        # The prompt-flush regex requires a valid hostname prefix before # or >
+        # so that pager strings like "--More--" are never mistaken for a prompt.
+        $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $readerRunspace = [PowerShell]::Create()
+        $readerRunspace.AddScript({
+            param($reader, $queue)
+            try {
+                $buf = [System.Text.StringBuilder]::new()
+                while ($true) {
+                    $c = $reader.Read()       # blocks until a char is available or EOS
+                    if ($c -eq -1) { break }  # end of stream
+                    $ch = [char]$c
+                    if ($ch -eq "`r") { continue }   # discard bare CR
+                    if ($ch -eq "`n") {
+                        $queue.Enqueue($buf.ToString())
+                        $buf.Clear() | Out-Null
+                    }
+                    else {
+                        $buf.Append($ch) | Out-Null
+                        $s = $buf.ToString()
+                        # Flush when the buffer matches a device prompt.
+                        # Requires a hostname-start character before # or > to
+                        # prevent pager strings (e.g. "--More--") from matching.
+                        if ($s -match '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$') {
+                            $queue.Enqueue($s)
+                            $buf.Clear() | Out-Null
+                        }
+                    }
+                }
+                if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
+            }
+            catch { }
+            finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
+        }).AddArgument($proc.StandardOutput).AddArgument($lineQueue) | Out-Null
+        $readerHandle = $readerRunspace.BeginInvoke()
+
+        # Wait for the initial device prompt before sending any commands.
+        # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
+        $perCmdTimeoutMs = $Timeout * 1000
+        $lastPrompt = ""
+        if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
+            $proc.Kill()
+            throw "Timed out waiting for initial device prompt after ${Timeout}s."
+        }
+
+        # Send each command and wait for the resulting prompt before proceeding.
+        # This guarantees all output from a command is collected before the next
+        # command is sent, eliminating the out-of-order output race condition.
         foreach ($cmd in $CommandList) {
+            # Optional settle delay applied after receiving the previous prompt,
+            # before sending the next command. Useful for devices that display
+            # the prompt slightly before their output buffer is fully flushed.
+            if ($CmdDelayMs -gt 0) { Start-Sleep -Milliseconds $CmdDelayMs }
+
             $proc.StandardInput.WriteLine($cmd)
             $proc.StandardInput.Flush()
-            Start-Sleep -Milliseconds $CmdDelayMs
-            # Trailing blank lines for final output
-            $proc.StandardInput.WriteLine("")
-            $proc.StandardInput.WriteLine("")
-            $proc.StandardInput.WriteLine("")
-            $proc.StandardInput.Flush()
+
+            # Cisco IOS echoes the command back as the first line of output.
+            # Dequeue that echo and join it with the held prompt to produce the
+            # natural "hostname#show inventory" layout seen in a live session.
+            $echoLine = ""
+            $echoDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+            while ([DateTime]::UtcNow -lt $echoDeadline) {
+                if ($lineQueue.TryDequeue([ref]$echoLine)) { break }
+                Start-Sleep -Milliseconds 20
+            }
+            $stdOutBuilder.AppendLine("$lastPrompt$echoLine") | Out-Null
+
+            $lastPrompt = ""
+            if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
+                $proc.Kill()
+                throw "Timed out waiting for device prompt after command '$cmd'."
+            }
+
+            # Repeat the prompt twice as visual separators between command blocks.
+            # Using the actual prompt (rather than blank lines) means every non-blank
+            # line in the output section is either a prompt, a command echo, or device
+            # output — making the log straightforward to parse programmatically later.
+            $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+            $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
         }
+
+        # Write the final prompt (returned after the last command's output) so
+        # the log ends exactly as a real terminal session would.
+        if ($lastPrompt -ne "") { $stdOutBuilder.AppendLine($lastPrompt) | Out-Null }
         $proc.StandardInput.Close()
 
-        # Wait for process to finish with a generous overall timeout
-        #$overallTimeoutMs = ($Timeout + 60 + ($CommandList.Count * 10)) * 1000
-        $totalCmdDelayMs = $CommandList.Count * $CmdDelayMs
-        $overallTimeoutMs = (($Timeout + 60) * 1000) + $totalCmdDelayMs
+        # Drain any remaining output after stdin is closed (e.g. logout messages).
+        Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs ([Math]::Min($perCmdTimeoutMs, 5000)) -PromptText ([ref]$null) | Out-Null
+
+        # Overall safety-net timeout: initial prompt wait + per-command read time +
+        # settle delays + post-drain + 15s margin. Under normal operation the process
+        # will have already exited by the time this is reached.
+        $overallTimeoutMs = ($Timeout * 1000) +
+        ($CommandList.Count * $Timeout * 1000) +
+        ($CommandList.Count * $CmdDelayMs) +
+        15000
         $exited = $proc.WaitForExit($overallTimeoutMs)
 
         if (-not $exited) {
@@ -325,13 +452,11 @@ function Invoke-SSHSession {
             throw "SSH session timed out after $([math]::Round($overallTimeoutMs / 1000))s (overall timeout)."
         }
 
-        # Ensure async output events have time to flush completely
-        # WaitForExit() with no args after a timed WaitForExit() forces async stream drain
-        $proc.WaitForExit()
-        Start-Sleep -Milliseconds 500
-
-        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
         Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+
+        # Wait for the reader runspace to finish draining the stdout stream
+        $readerRunspace.EndInvoke($readerHandle) | Out-Null
+        $readerRunspace.Dispose()
 
         $stdOut = $stdOutBuilder.ToString()
         $stdErr = $stdErrBuilder.ToString().Trim()
@@ -431,6 +556,13 @@ function Invoke-SSHSession {
         }
         catch {
             Write-Verbose "Process cleanup for $IPAddress : $($_.Exception.Message)"
+        }
+
+        try {
+            if ($null -ne $readerRunspace) { $readerRunspace.Dispose() }
+        }
+        catch {
+            Write-Verbose "Reader runspace cleanup for $IPAddress : $($_.Exception.Message)"
         }
     }
 
