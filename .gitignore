@@ -1,6 +1,9 @@
 # Ignore log directory
 logs/
 
-#Ignore common input file names
+# Ignore common input file names
 commands.txt
 devices.txt
+
+# Exclude claude directory
+.claude
