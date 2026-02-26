@@ -351,37 +351,44 @@ function Invoke-SSHSession {
         # The prompt-flush regex requires a valid hostname prefix before # or >
         # so that pager strings like "--More--" are never mistaken for a prompt.
         $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        # Single-element array shared with the reader runspace as a mutable regex slot.
+        # The outer scope overwrites [0] once the device hostname is known; the runspace
+        # reads it on every character iteration. String reference assignment is atomic in .NET.
+        $regexHolder    = [string[]]::new(1)
+        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$'
+
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
-                param($reader, $queue)
-                try {
-                    $buf = [System.Text.StringBuilder]::new()
-                    while ($true) {
-                        $c = $reader.Read()       # blocks until a char is available or EOS
-                        if ($c -eq -1) { break }  # end of stream
-                        $ch = [char]$c
-                        if ($ch -eq "`r") { continue }   # discard bare CR
-                        if ($ch -eq "`n") {
-                            $queue.Enqueue($buf.ToString())
+            param($reader, $queue, $holder)
+            try {
+                $buf = [System.Text.StringBuilder]::new()
+                while ($true) {
+                    $c = $reader.Read()       # blocks until a char is available or EOS
+                    if ($c -eq -1) { break }  # end of stream
+                    $ch = [char]$c
+                    if ($ch -eq "`r") { continue }   # discard bare CR
+                    if ($ch -eq "`n") {
+                        $queue.Enqueue($buf.ToString())
+                        $buf.Clear() | Out-Null
+                    }
+                    else {
+                        $buf.Append($ch) | Out-Null
+                        $s = $buf.ToString()
+                        # Flush when the buffer matches the current prompt pattern.
+                        # After the hostname is discovered the outer scope writes a
+                        # tighter hostname-anchored pattern into $holder[0], preventing
+                        # table column headers (e.g. "Switch#") from being flushed.
+                        if ($s -match $holder[0]) {
+                            $queue.Enqueue($s)
                             $buf.Clear() | Out-Null
                         }
-                        else {
-                            $buf.Append($ch) | Out-Null
-                            $s = $buf.ToString()
-                            # Flush when the buffer matches a device prompt.
-                            # Requires a hostname-start character before # or > to
-                            # prevent pager strings (e.g. "--More--") from matching.
-                            if ($s -match '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$') {
-                                $queue.Enqueue($s)
-                                $buf.Clear() | Out-Null
-                            }
-                        }
                     }
-                    if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
                 }
-                catch { }
-                finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
-            }).AddArgument($proc.StandardOutput).AddArgument($lineQueue) | Out-Null
+                if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
+            }
+            catch { }
+            finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
+        }).AddArgument($proc.StandardOutput).AddArgument($lineQueue).AddArgument($regexHolder) | Out-Null
         $readerHandle = $readerRunspace.BeginInvoke()
 
         # Wait for the initial device prompt before sending any commands.
@@ -392,6 +399,28 @@ function Invoke-SSHSession {
             $proc.Kill()
             throw "Timed out waiting for initial device prompt after ${Timeout}s."
         }
+
+        # Now that the initial prompt is captured in $lastPrompt (e.g. "s3850x-1#"),
+        # extract the device hostname and replace the broad prompt-detection regex with
+        # one anchored to this exact hostname. This prevents output lines that happen to
+        # match the broad pattern (e.g. the "Switch#" column header in "show switch")
+        # from being misidentified as a device prompt.
+        $knownHostname = Get-HostnameFromPrompt -Output $lastPrompt
+        if (-not [string]::IsNullOrWhiteSpace($knownHostname)) {
+            $hn = [System.Text.RegularExpressions.Regex]::Escape($knownHostname)
+
+            # Update the shared holder so the already-running reader runspace picks up
+            # the tighter pattern on its next character iteration.
+            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>])\s*`$"
+
+            # Replace the compiled Regex used by Read-UntilPrompt for all subsequent calls.
+            $promptRegex = [System.Text.RegularExpressions.Regex]::new(
+                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)",
+                [System.Text.RegularExpressions.RegexOptions]::Compiled
+            )
+        }
+        # If hostname extraction failed, $promptRegex and $regexHolder[0] remain the
+        # broad patterns — behaviour is identical to before, which is the correct fallback.
 
         # Send each command and wait for the resulting prompt before proceeding.
         # This guarantees all output from a command is collected before the next
@@ -580,20 +609,20 @@ if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..."
 $logDirStr = $logDirStr.PadRight(37)
 
 Write-Host ""
-Write-Host "+==================================================+" -ForegroundColor Gray
-Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Gray
-Write-Host "+==================================================+" -ForegroundColor Gray
-Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
-Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
-Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
-Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
+Write-Host "+==================================================+" -ForegroundColor Green
+Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Green
+Write-Host "+==================================================+" -ForegroundColor Green
+Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Green
+Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Green
+Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Green
+Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Green
 if ($ExtraSSHOptions.Count -gt 0) {
     $sshOptsStr = ($ExtraSSHOptions -join " ")
     if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
     $sshOptsStr = $sshOptsStr.PadRight(37)
-    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Gray
+    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Green
 }
-Write-Host "+==================================================+" -ForegroundColor Gray
+Write-Host "+==================================================+" -ForegroundColor Green
 Write-Host ""
 
 $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -628,7 +657,7 @@ foreach ($ip in $devices) {
 # ---------------------------------------------
 $successCount = @($results | Where-Object { $_.Status -eq "Success" }).Count
 $failCount = @($results | Where-Object { $_.Status -ne "Success" }).Count
-$failColor = if ($failCount -gt 0) { "Red" } else { "Gray" }
+$failColor = if ($failCount -gt 0) { "Red" } else { "Green" }
 
 $totalStr = "$($results.Count)".PadRight(36)
 $successStr = "$successCount".PadRight(36)
