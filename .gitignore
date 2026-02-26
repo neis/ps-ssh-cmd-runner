@@ -6,4 +6,4 @@ commands.txt
 devices.txt
 
 # Exclude claude directory
-.claude
+.claude/
