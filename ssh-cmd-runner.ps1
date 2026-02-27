@@ -736,7 +736,7 @@ Write-Host "JSON output: $jsonPath" -ForegroundColor Cyan
 # ---------------------------------------------
 $successCount = @($results | Where-Object { $_.Status -eq "Success" }).Count
 $failCount = @($results | Where-Object { $_.Status -ne "Success" }).Count
-$failColor = if ($failCount -gt 0) { "Red" } else { "Green" }
+$failColor = if ($failCount -gt 0) { "Red" } else { "Gray" }
 
 $totalStr = "$($results.Count)".PadRight(36)
 $successStr = "$successCount".PadRight(36)
