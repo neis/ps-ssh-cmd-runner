@@ -45,16 +45,18 @@ straightforward to parse programmatically.
 
 ## JSON OUTPUT
 
-In addition to the per-device `.log` files, the script writes a single `output.json` file
-to the JSON directory (default: `.\json\output.json`) after all devices have been processed.
-The file is overwritten on every run.
+In addition to the per-device `.log` files, the script writes a timestamped JSON file
+to the JSON directory (default: `.\json\`) after all devices have been processed.
+The filename follows the convention `ssh-output-<timestamp>.json` (e.g. `ssh-output-20260226_150659.json`),
+matching the `.log` file naming convention so successive runs never overwrite each other.
 
 ### Structure
 
 ```json
 {
   "summary": {
-    "platform": "Windows",
+    "platform": "Microsoft Windows 10.0.22631",
+    "engine": "PowerShell 7.5.4",
     "date": "2026-02-26 15:36:18",
     "result": { "total": 2, "success": 1, "failed": 1 },
     "devices": {
@@ -97,6 +99,8 @@ The file is overwritten on every run.
   escaped as `\"` by `ConvertTo-Json` — no manual handling is required.
 - The `summary.date` reflects the run start time; per-device `timestamp` reflects the
   completion time of that device's session.
+- `summary.platform` is populated dynamically from the host OS (e.g. `"Microsoft Windows 10.0.22631"`).
+- `summary.engine` reflects the PowerShell version that ran the script (e.g. `"PowerShell 7.5.4"`).
 
 ## REQUIREMENTS
 
@@ -128,9 +132,9 @@ command. Useful for slower devices or commands that produce large output where t
 may appear before the output buffer is fully flushed. Valid range: 100–10000. Default: `500`
 
 **JsonDirectory** `[string]`
-Directory where `output.json` will be written. Created automatically if it does not exist.
-The file is always named `output.json` and is overwritten on every run.
-Default: `.\json`
+Directory where the JSON output file will be written. Created automatically if it does not exist.
+The filename uses the format `ssh-output-<timestamp>.json` so successive runs never overwrite
+each other. Default: `.\json`
 
 **ExtraSSHOptions** `[string[]]`
 Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly

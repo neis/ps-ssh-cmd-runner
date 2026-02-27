@@ -33,6 +33,11 @@
     the device can process them. *Default is 0ms*. Increase for slower
     devices or commands that produce large output.
 
+.PARAMETER JsonDirectory
+    Directory where the JSON output file will be saved. Created automatically if it doesn't exist.
+    The filename uses the format ssh-output-<timestamp>.json so successive runs never overwrite
+    each other. Default is .\json.
+
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
 
@@ -53,6 +58,11 @@
     .\Invoke-NetworkSSH.ps1 -CommandDelayMs 1000
 
     Uses a 1-second delay between commands for slower devices or large output.
+
+.EXAMPLE
+    .\ssh-cmd-runner.ps1 -JsonDirectory "C:\Data\NetworkJSON"
+
+    Writes the JSON output file to C:\Data\NetworkJSON\ instead of the default .\json\ folder.
 #>
 
 [CmdletBinding()]
@@ -85,9 +95,11 @@ param(
 # INITIALIZE
 # ---------------------------------------------
 $ErrorActionPreference = "Stop"
-$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$runDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-$separator = ("=" * 59)
+$timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+$runDate    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$osPlatform = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription.Trim()
+$psEngine   = "PowerShell $($PSVersionTable.PSVersion.ToString())"
+$separator  = ("=" * 59)
 $thinSep = ("-" * 40)
 
 # Validate input files exist
@@ -636,6 +648,9 @@ $timeoutStr = "${TimeoutSeconds}s".PadRight(37)
 $logDirStr = $LogDirectory
 if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
 $logDirStr = $logDirStr.PadRight(37)
+$jsonDirStr = $JsonDirectory
+if ($jsonDirStr.Length -gt 37) { $jsonDirStr = $jsonDirStr.Substring(0, 34) + "..." }
+$jsonDirStr = $jsonDirStr.PadRight(37)
 
 Write-Host ""
 Write-Host "+==================================================+" -ForegroundColor Gray
@@ -645,6 +660,7 @@ Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
 Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
+Write-Host "|  JSON Dir : ${jsonDirStr}|" -ForegroundColor Gray
 if ($ExtraSSHOptions.Count -gt 0) {
     $sshOptsStr = ($ExtraSSHOptions -join " ")
     if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
@@ -689,7 +705,8 @@ $failedIPs = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Obj
 
 $jsonDoc = [ordered]@{
     summary = [ordered]@{
-        platform = "Windows"
+        platform = $osPlatform
+        engine   = $psEngine
         date     = $runDate
         result   = [ordered]@{
             total   = $results.Count
@@ -726,7 +743,7 @@ $jsonDoc = [ordered]@{
     )
 }
 
-$jsonPath = Join-Path $JsonDirectory "output.json"
+$jsonPath = Join-Path $JsonDirectory "ssh-output-${timestamp}.json"
 $jsonDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
 Write-Host ""
 Write-Host "JSON output: $jsonPath" -ForegroundColor Cyan
