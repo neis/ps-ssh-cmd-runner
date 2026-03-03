@@ -38,6 +38,12 @@
     The filename uses the format ssh-output-<timestamp>.json so successive runs never overwrite
     each other. Default is .\json.
 
+.PARAMETER NexusDirectory
+    Directory where per-device raw output text files will be saved. Created automatically
+    if it doesn't exist. Each successful device gets its own file using the naming
+    convention: DeviceName_IPAddress_Timestamp.txt. Failed connections are skipped.
+    Default is .\nexus.
+
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
 
@@ -63,6 +69,11 @@
     .\ssh-cmd-runner.ps1 -JsonDirectory "C:\Data\NetworkJSON"
 
     Writes the JSON output file to C:\Data\NetworkJSON\ instead of the default .\json\ folder.
+
+.EXAMPLE
+    .\ssh-cmd-runner.ps1 -NexusDirectory "C:\Data\NexusOutput"
+
+    Writes per-device raw output files to C:\Data\NexusOutput\ instead of the default .\nexus\ folder.
 #>
 
 [CmdletBinding()]
@@ -88,18 +99,21 @@ param(
     [int]$CommandDelayMs = 500,
 
     [Parameter(Mandatory = $false, HelpMessage = "Directory where the JSON output file will be saved. Created automatically if it doesn't exist.")]
-    [string]$JsonDirectory = ".\json"
+    [string]$JsonDirectory = ".\json",
+
+    [Parameter(Mandatory = $false, HelpMessage = "Directory where per-device raw output text files will be saved. Created automatically if it doesn't exist.")]
+    [string]$NexusDirectory = ".\nexus"
 )
 
 # ---------------------------------------------
 # INITIALIZE
 # ---------------------------------------------
 $ErrorActionPreference = "Stop"
-$timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
-$runDate    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$runDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $osPlatform = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription.Trim()
-$psEngine   = "PowerShell $($PSVersionTable.PSVersion.ToString())"
-$separator  = ("=" * 59)
+$psEngine = "PowerShell $($PSVersionTable.PSVersion.ToString())"
+$separator = ("=" * 59)
 $thinSep = ("-" * 40)
 
 # Validate input files exist
@@ -129,6 +143,11 @@ if (-not (Test-Path $LogDirectory)) {
 # Create JSON output directory
 if (-not (Test-Path $JsonDirectory)) {
     New-Item -ItemType Directory -Path $JsonDirectory -Force | Out-Null
+}
+
+# Create nexus output directory
+if (-not (Test-Path $NexusDirectory)) {
+    New-Item -ItemType Directory -Path $NexusDirectory -Force | Out-Null
 }
 
 # Read and validate device list (skip blanks and comments)
@@ -651,6 +670,9 @@ $logDirStr = $logDirStr.PadRight(37)
 $jsonDirStr = $JsonDirectory
 if ($jsonDirStr.Length -gt 37) { $jsonDirStr = $jsonDirStr.Substring(0, 34) + "..." }
 $jsonDirStr = $jsonDirStr.PadRight(37)
+$nexusDirStr = $NexusDirectory
+if ($nexusDirStr.Length -gt 37) { $nexusDirStr = $nexusDirStr.Substring(0, 34) + "..." }
+$nexusDirStr = $nexusDirStr.PadRight(37)
 
 Write-Host ""
 Write-Host "+==================================================+" -ForegroundColor Gray
@@ -661,6 +683,7 @@ Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
 Write-Host "|  JSON Dir : ${jsonDirStr}|" -ForegroundColor Gray
+Write-Host "|  Nexus Dir: ${nexusDirStr}|" -ForegroundColor Gray
 if ($ExtraSSHOptions.Count -gt 0) {
     $sshOptsStr = ($ExtraSSHOptions -join " ")
     if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
@@ -698,9 +721,26 @@ foreach ($ip in $devices) {
 }
 
 # ---------------------------------------------
-# JSON OUTPUT
+# NEXUS OUTPUT
 # ---------------------------------------------
 $successResults = @($results | Where-Object { $_.Status -eq "Success" })
+
+foreach ($r in $successResults) {
+    $safeDevice = ConvertTo-SafeFileName $r.DeviceName
+    $safeIP     = ConvertTo-SafeFileName $r.IPAddress
+    $nexusFile  = Join-Path $NexusDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
+
+    $nexusLines = foreach ($cr in $r.CommandResults) {
+        $cr.command
+        $cr.raw_output
+    }
+    Set-Content -Path $nexusFile -Value ($nexusLines -join "`r`n") -Encoding UTF8
+    Write-Host "Nexus output: $nexusFile" -ForegroundColor Cyan
+}
+
+# ---------------------------------------------
+# JSON OUTPUT
+# ---------------------------------------------
 $failedIPs = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
 
 $jsonDoc = [ordered]@{

@@ -1,6 +1,7 @@
 # Ignore output directories
 logs/
 json/
+nexus/
 
 # Ignore common input file names
 commands.txt
