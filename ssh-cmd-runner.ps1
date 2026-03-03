@@ -148,7 +148,6 @@ Write-Verbose "Using SSH client: $($sshPath.Source)"
 # Create log directory
 if (-not (Test-Path $LogDirectory)) {
     New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
-    #Write-Host "[INFO] Created log directory: $LogDirectory" -ForegroundColor Cyan
 }
 
 # Create JSON output directory
@@ -167,10 +166,9 @@ ForEach-Object { $_.Trim() } |
 Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
 
 if ($devices.Count -eq 0) {
-    Write-Error "No valid device IPs found in '$DeviceListFile'."
+    Write-Error "No device IPs found in '$DeviceListFile'."
     exit 1
 }
-#Write-Host "[INFO] Loaded $($devices.Count) device(s) from '$DeviceListFile'" -ForegroundColor Cyan
 
 # Read commands
 $commands = Get-Content $CommandsFile |
@@ -181,7 +179,6 @@ if ($commands.Count -eq 0) {
     Write-Error "No valid commands found in '$CommandsFile'."
     exit 1
 }
-#Write-Host "[INFO] Loaded $($commands.Count) command(s) from '$CommandsFile'" -ForegroundColor Cyan
 
 # Prompt for credentials (once)
 Write-Host ""
@@ -772,7 +769,6 @@ foreach ($r in $successResults) {
         $nexusLines.Add($cr.prompt)
     }
     Set-Content -Path $nexusFile -Value ($nexusLines -join "`r`n") -Encoding UTF8
-    Write-Host "Nexus output: $nexusFile" -ForegroundColor Cyan
 }
 
 # ---------------------------------------------
@@ -822,8 +818,6 @@ $jsonDoc = [ordered]@{
 
 $jsonPath = Join-Path $JsonDirectory "ssh-output-${timestamp}.json"
 $jsonDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
-Write-Host ""
-Write-Host "JSON output: $jsonPath" -ForegroundColor Cyan
 
 # ---------------------------------------------
 # SUMMARY REPORT
