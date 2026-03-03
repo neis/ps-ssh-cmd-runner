@@ -41,9 +41,10 @@
     Note: -TimeoutSeconds controls only the initial SSH connection handshake.
 
 .PARAMETER JsonDirectory
-    Directory where the JSON output file will be saved. Created automatically if it doesn't exist.
-    The filename uses the format ssh-output-<timestamp>.json so successive runs never overwrite
-    each other. Default is .\json.
+    Directory where JSON output files will be saved. Created automatically if it doesn't exist.
+    Each run produces a timestamped session summary (ssh-session-<timestamp>.json) plus one
+    per-device file (<name>_<ip>_<timestamp>.json) for each successful connection.
+    Default is .\json.
 
 .PARAMETER NexusDirectory
     Directory where per-device raw output text files will be saved. Created automatically
@@ -776,48 +777,50 @@ foreach ($r in $successResults) {
 # ---------------------------------------------
 $failedIPs = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
 
-$jsonDoc = [ordered]@{
-    summary = [ordered]@{
-        platform = $osPlatform
-        engine   = $psEngine
-        date     = $runDate
-        result   = [ordered]@{
-            total   = $results.Count
-            success = $successResults.Count
-            failed  = $failedIPs.Count
-        }
-        devices  = [ordered]@{
-            count               = $results.Count
-            ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
-            failed_ip_addresses = @($failedIPs)
-        }
-        commands = [ordered]@{
-            count = $commands.Count
-            list  = @($commands)
-        }
+# --- Session summary file ---
+$sessionDoc = [ordered]@{
+    platform = $osPlatform
+    engine   = $psEngine
+    date     = $runDate
+    result   = [ordered]@{
+        total   = $results.Count
+        success = $successResults.Count
+        failed  = $failedIPs.Count
     }
-    devices = @(
-        $successResults | ForEach-Object {
-            $dev = $_
-            [ordered]@{
-                name      = $dev.DeviceName
-                ip        = $dev.IPAddress
-                timestamp = $dev.Timestamp
-                commands  = @(
-                    $dev.CommandResults | ForEach-Object {
-                        [ordered]@{
-                            command    = $_.command
-                            raw_output = @($_.raw_output)
-                        }
-                    }
-                )
-            }
-        }
-    )
+    devices  = [ordered]@{
+        count               = $results.Count
+        ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
+        failed_ip_addresses = @($failedIPs)
+    }
+    commands = [ordered]@{
+        count = $commands.Count
+        list  = @($commands)
+    }
 }
+$sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
+$sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
 
-$jsonPath = Join-Path $JsonDirectory "ssh-output-${timestamp}.json"
-$jsonDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $jsonPath -Encoding UTF8
+# --- Per-device JSON files (successful connections only) ---
+foreach ($r in $successResults) {
+    $safeDevice = ConvertTo-SafeFileName $r.DeviceName
+    $safeIP     = ConvertTo-SafeFileName $r.IPAddress
+    $devicePath = Join-Path $JsonDirectory "${safeDevice}_${safeIP}_${timestamp}.json"
+
+    $deviceDoc = [ordered]@{
+        name      = $r.DeviceName
+        ip        = $r.IPAddress
+        timestamp = $r.Timestamp
+        commands  = @(
+            $r.CommandResults | ForEach-Object {
+                [ordered]@{
+                    command    = $_.command
+                    raw_output = @($_.raw_output)
+                }
+            }
+        )
+    }
+    $deviceDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $devicePath -Encoding UTF8
+}
 
 # ---------------------------------------------
 # SUMMARY REPORT
