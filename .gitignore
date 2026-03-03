@@ -1,7 +1,7 @@
 # Ignore output directories
 logs/
 json/
-nexus/
+netcortex/
 
 # Ignore config file (use [example] config.json as a reference)
 config.json

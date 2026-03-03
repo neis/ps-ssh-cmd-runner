@@ -46,11 +46,11 @@
     per-device file (<name>_<ip>_<timestamp>.json) for each successful connection.
     Default is .\json.
 
-.PARAMETER NexusDirectory
+.PARAMETER NetcortexDirectory
     Directory where per-device raw output text files will be saved. Created automatically
     if it doesn't exist. Each successful device gets its own file using the naming
     convention: DeviceName_IPAddress_Timestamp.txt. Failed connections are skipped.
-    Default is .\nexus.
+    Default is .\netcortex.
 
 .PARAMETER LogEnabled
     Enable or disable log output files. When $false, no .log files are written to LogDirectory.
@@ -60,9 +60,9 @@
     Enable or disable JSON output files. When $false, no session or per-device .json files
     are written to JsonDirectory. Default is $false.
 
-.PARAMETER NexusEnabled
-    Enable or disable Nexus raw output text files. When $false, no .txt files are written
-    to NexusDirectory. Default is $false.
+.PARAMETER NetcortexEnabled
+    Enable or disable Netcortex raw output text files. When $false, no .txt files are written
+    to NetcortexDirectory. Default is $false.
 
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
@@ -91,9 +91,9 @@
     Writes the JSON output file to C:\Data\NetworkJSON\ instead of the default .\json\ folder.
 
 .EXAMPLE
-    .\ssh-cmd-runner.ps1 -NexusDirectory "C:\Data\NexusOutput"
+    .\ssh-cmd-runner.ps1 -NetcortexDirectory "C:\Data\NetcortexOutput"
 
-    Writes per-device raw output files to C:\Data\NexusOutput\ instead of the default .\nexus\ folder.
+    Writes per-device raw output files to C:\Data\NetcortexOutput\ instead of the default .\netcortex\ folder.
 #>
 
 [CmdletBinding()]
@@ -126,7 +126,7 @@ param(
     [string]$JsonDirectory = ".\json",
 
     [Parameter(Mandatory = $false, HelpMessage = "Directory where per-device raw output text files will be saved. Created automatically if it doesn't exist.")]
-    [string]$NexusDirectory = ".\nexus",
+    [string]$NetcortexDirectory = ".\netcortex",
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable or disable log output files (default: true)")]
     [bool]$LogEnabled = $true,
@@ -134,8 +134,8 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Enable or disable JSON output files (default: false)")]
     [bool]$JsonEnabled = $false,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Enable or disable Nexus raw output files (default: false)")]
-    [bool]$NexusEnabled = $false
+    [Parameter(Mandatory = $false, HelpMessage = "Enable or disable Netcortex raw output files (default: false)")]
+    [bool]$NetcortexEnabled = $false
 )
 
 # ---------------------------------------------
@@ -156,7 +156,7 @@ if (Test-Path $configPath -PathType Leaf) {
     $requiredKeys = @(
         'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
         'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds',
-        'JsonDirectory', 'NexusDirectory', 'LogEnabled', 'JsonEnabled', 'NexusEnabled'
+        'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled'
     )
     $missingKeys = $requiredKeys | Where-Object { $config.PSObject.Properties.Name -notcontains $_ }
     if ($missingKeys.Count -gt 0) {
@@ -172,10 +172,10 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('CommandDelayMs'))        { $CommandDelayMs        = [int]$config.CommandDelayMs }
     if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds')) { $CommandTimeoutSeconds = [int]$config.CommandTimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('JsonDirectory'))         { $JsonDirectory         = $config.JsonDirectory }
-    if (-not $PSBoundParameters.ContainsKey('NexusDirectory'))        { $NexusDirectory        = $config.NexusDirectory }
+    if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory'))        { $NetcortexDirectory        = $config.NetcortexDirectory }
     if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
     if (-not $PSBoundParameters.ContainsKey('JsonEnabled'))           { $JsonEnabled           = [bool]$config.JsonEnabled }
-    if (-not $PSBoundParameters.ContainsKey('NexusEnabled'))          { $NexusEnabled          = [bool]$config.NexusEnabled }
+    if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled'))          { $NetcortexEnabled          = [bool]$config.NetcortexEnabled }
 }
 
 # ---------------------------------------------
@@ -217,9 +217,9 @@ if ($JsonEnabled -and -not (Test-Path $JsonDirectory)) {
     New-Item -ItemType Directory -Path $JsonDirectory -Force | Out-Null
 }
 
-# Create nexus output directory
-if ($NexusEnabled -and -not (Test-Path $NexusDirectory)) {
-    New-Item -ItemType Directory -Path $NexusDirectory -Force | Out-Null
+# Create netcortex output directory
+if ($NetcortexEnabled -and -not (Test-Path $NetcortexDirectory)) {
+    New-Item -ItemType Directory -Path $NetcortexDirectory -Force | Out-Null
 }
 
 # Read and validate device list (skip blanks and comments)
@@ -563,7 +563,7 @@ function Invoke-SSHSession {
             $cmdOutputBuilder = [System.Text.StringBuilder]::new()
 
             # Capture the current prompt before Read-UntilPrompt overwrites $lastPrompt.
-            # Stored per-command so the nexus output can reconstruct the prompt+command
+            # Stored per-command so the netcortex output can reconstruct the prompt+command
             # echo line (e.g. "cs3850x-1#term len 0") without re-parsing raw output.
             $cmdPrompt = $lastPrompt
             $lastPrompt = ""
@@ -763,11 +763,11 @@ if ($JsonEnabled) {
     if ($jsonDirStr.Length -gt 37) { $jsonDirStr = $jsonDirStr.Substring(0, 34) + "..." }
     $jsonDirStr = $jsonDirStr.PadRight(37)
 } else { $jsonDirStr = "Disabled".PadRight(37) }
-if ($NexusEnabled) {
-    $nexusDirStr = $NexusDirectory
-    if ($nexusDirStr.Length -gt 37) { $nexusDirStr = $nexusDirStr.Substring(0, 34) + "..." }
-    $nexusDirStr = $nexusDirStr.PadRight(37)
-} else { $nexusDirStr = "Disabled".PadRight(37) }
+if ($NetcortexEnabled) {
+    $netcortexDirStr = $NetcortexDirectory
+    if ($netcortexDirStr.Length -gt 37) { $netcortexDirStr = $netcortexDirStr.Substring(0, 34) + "..." }
+    $netcortexDirStr = $netcortexDirStr.PadRight(37)
+} else { $netcortexDirStr = "Disabled".PadRight(37) }
 
 Write-Host ""
 Write-Host "+==================================================+" -ForegroundColor Gray
@@ -779,7 +779,7 @@ Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
 Write-Host "|  JSON Dir : ${jsonDirStr}|" -ForegroundColor Gray
-Write-Host "|  Nexus Dir: ${nexusDirStr}|" -ForegroundColor Gray
+Write-Host "|  Netcortex: ${netcortexDirStr}|" -ForegroundColor Gray
 if ($ExtraSSHOptions.Count -gt 0) {
     $sshOptsStr = ($ExtraSSHOptions -join " ")
     if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
@@ -824,28 +824,28 @@ $successResults = @($results | Where-Object { $_.Status -eq "Success" })
 $failedIPs      = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
 
 # ---------------------------------------------
-# NEXUS OUTPUT
+# NETCORTEX OUTPUT
 # ---------------------------------------------
-if ($NexusEnabled) {
+if ($NetcortexEnabled) {
     foreach ($r in $successResults) {
         $safeDevice = ConvertTo-SafeFileName $r.DeviceName
         $safeIP = ConvertTo-SafeFileName $r.IPAddress
-        $nexusFile = Join-Path $NexusDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
+        $netcortexFile = Join-Path $NetcortexDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
 
-        # Build nexus content: prompt+command echo, raw output, bare prompt separator.
+        # Build netcortex content: prompt+command echo, raw output, bare prompt separator.
         # Trailing blank lines are stripped from each command's output so the bare
         # prompt lands immediately after the last non-empty output line — giving the
         # downstream ingest a clean prompt-delimited structure with no ambiguous blanks.
-        $nexusLines = [System.Collections.Generic.List[string]]::new()
+        $netcortexLines = [System.Collections.Generic.List[string]]::new()
         foreach ($cr in $r.CommandResults) {
-            $nexusLines.Add("$($cr.prompt)$($cr.command)")
+            $netcortexLines.Add("$($cr.prompt)$($cr.command)")
             $outLines = @($cr.raw_output)
             $trimIdx = $outLines.Count - 1
             while ($trimIdx -ge 0 -and [string]::IsNullOrEmpty($outLines[$trimIdx])) { $trimIdx-- }
-            for ($i = 0; $i -le $trimIdx; $i++) { $nexusLines.Add($outLines[$i]) }
-            $nexusLines.Add($cr.prompt)
+            for ($i = 0; $i -le $trimIdx; $i++) { $netcortexLines.Add($outLines[$i]) }
+            $netcortexLines.Add($cr.prompt)
         }
-        Set-Content -Path $nexusFile -Value ($nexusLines -join "`r`n") -Encoding UTF8
+        Set-Content -Path $netcortexFile -Value ($netcortexLines -join "`r`n") -Encoding UTF8
     }
 }
 

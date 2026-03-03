@@ -7,8 +7,8 @@
     "CommandDelayMs": 500,
     "CommandTimeoutSeconds": 30,
     "JsonDirectory": "./json",
-    "NexusDirectory": "./nexus",
+    "NetcortexDirectory": "./netcortex",
     "LogEnabled": true,
     "JsonEnabled": false,
-    "NexusEnabled": false
+    "NetcortexEnabled": false
 }
