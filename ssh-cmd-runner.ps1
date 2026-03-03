@@ -64,6 +64,15 @@
     Enable or disable Netcortex raw output text files. When $false, no .txt files are written
     to NetcortexDirectory. Default is $false.
 
+.PARAMETER CredentialLabel
+    The target name used to store and retrieve credentials in Windows Credential Manager.
+    Allows different credential sets to be stored for different environments.
+    Default is "SSH-CMD-Runner".
+
+.PARAMETER ClearCredentials
+    When $true, deletes any stored credentials matching CredentialLabel before prompting
+    for new ones. Useful after a password rotation. Default is $false.
+
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
 
@@ -135,7 +144,13 @@ param(
     [bool]$JsonEnabled = $false,
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable or disable Netcortex raw output files (default: false)")]
-    [bool]$NetcortexEnabled = $false
+    [bool]$NetcortexEnabled = $false,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Windows Credential Manager label used to store and retrieve SSH credentials (default: SSH-CMD-Runner)")]
+    [string]$CredentialLabel = "SSH-CMD-Runner",
+
+    [Parameter(Mandatory = $false, HelpMessage = "Clear stored credentials matching CredentialLabel and prompt for new ones (default: false)")]
+    [bool]$ClearCredentials = $false
 )
 
 # ---------------------------------------------
@@ -156,7 +171,8 @@ if (Test-Path $configPath -PathType Leaf) {
     $requiredKeys = @(
         'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
         'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds',
-        'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled'
+        'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled',
+        'CredentialLabel', 'ClearCredentials'
     )
     $missingKeys = $requiredKeys | Where-Object { $config.PSObject.Properties.Name -notcontains $_ }
     if ($missingKeys.Count -gt 0) {
@@ -175,7 +191,9 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory'))        { $NetcortexDirectory        = $config.NetcortexDirectory }
     if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
     if (-not $PSBoundParameters.ContainsKey('JsonEnabled'))           { $JsonEnabled           = [bool]$config.JsonEnabled }
-    if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled'))          { $NetcortexEnabled          = [bool]$config.NetcortexEnabled }
+    if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled'))   { $NetcortexEnabled   = [bool]$config.NetcortexEnabled }
+    if (-not $PSBoundParameters.ContainsKey('CredentialLabel'))   { $CredentialLabel    = $config.CredentialLabel }
+    if (-not $PSBoundParameters.ContainsKey('ClearCredentials'))  { $ClearCredentials   = [bool]$config.ClearCredentials }
 }
 
 # ---------------------------------------------
@@ -242,35 +260,47 @@ if ($commands.Count -eq 0) {
     exit 1
 }
 
-# Prompt for credentials (once)
+# ---------------------------------------------
+# CREDENTIAL MANAGEMENT
+# Precedence: Windows Credential Manager > interactive prompt.
+# Credentials are written to Credential Manager only after a successful
+# device connection confirms they work. ClearCredentials forces a fresh
+# prompt and removes any stored entry before looking up new ones.
+# ---------------------------------------------
 Write-Host ""
-$credential = Get-Credential -Message "Enter SSH credentials for network devices"
-$username = $credential.UserName
-$password = $credential.GetNetworkCredential().Password
 
-# Escape characters that cmd.exe treats as special operators.
-# Without this, passwords containing & | < > ^ % ! will be
-# misinterpreted by the command shell when the askpass helper runs.
-# Caret (^) must be escaped first to avoid double-escaping the others.
-$escapedPassword = $password
-$escapedPassword = $escapedPassword.Replace('^', '^^')
-$escapedPassword = $escapedPassword.Replace('&', '^&')
-$escapedPassword = $escapedPassword.Replace('|', '^|')
-$escapedPassword = $escapedPassword.Replace('<', '^<')
-$escapedPassword = $escapedPassword.Replace('>', '^>')
-$escapedPassword = $escapedPassword.Replace('!', '^!')
-$escapedPassword = $escapedPassword.Replace('%', '%%')
+if ($ClearCredentials) {
+    [CredentialManager]::DeleteCredential($CredentialLabel) | Out-Null
+    Write-Host "Stored credentials for '$CredentialLabel' cleared." -ForegroundColor Yellow
+}
+
+$storedUsername = [CredentialManager]::ReadUsername($CredentialLabel)
+$storedPassword = [CredentialManager]::ReadPassword($CredentialLabel)
+
+if ($storedUsername -and $null -ne $storedPassword -and -not $ClearCredentials) {
+    $username         = $storedUsername
+    $password         = $storedPassword
+    $credentialsSaved = $true   # already in Credential Manager — no re-save needed
+    Write-Host "Using stored credentials for '$username' (label: $CredentialLabel)." -ForegroundColor Cyan
+}
+else {
+    $credential       = Get-Credential -Message "Enter SSH credentials for network devices"
+    $username         = $credential.UserName
+    $password         = $credential.GetNetworkCredential().Password
+    $credentialsSaved = $false  # freshly entered — save after first verified success
+}
 
 # ---------------------------------------------
 # SSH_ASKPASS HELPER
-# Creates a temporary script that ssh.exe calls to retrieve the password
-# so we avoid interactive password prompts per device.
+# Creates a temporary .cmd script that ssh.exe calls to retrieve the
+# password, avoiding interactive prompts per device. Set-AskPassScript
+# handles cmd.exe special-character escaping and is called again
+# whenever credentials are updated mid-run.
 # ---------------------------------------------
-$askPassDir = Join-Path $env:TEMP "ssh_askpass_$timestamp"
+$askPassDir    = Join-Path $env:TEMP "ssh_askpass_$timestamp"
 New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
-
 $askPassScript = Join-Path $askPassDir "askpass.cmd"
-Set-Content -Path $askPassScript -Value "@echo $escapedPassword" -Force
+Set-AskPassScript -ScriptPath $askPassScript -Password $password
 
 # ---------------------------------------------
 # HELPER FUNCTION: Parse device hostname from SSH output
@@ -320,6 +350,117 @@ function Get-HostnameFromPrompt {
 function ConvertTo-SafeFileName {
     param([string]$InputString)
     return ($InputString -replace '[\\/:*?"<>|]', '_')
+}
+
+# ---------------------------------------------
+# CREDENTIAL MANAGER (Windows native P/Invoke — no external modules)
+# ---------------------------------------------
+if (-not ([System.Management.Automation.PSTypeName]'CredentialManager').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class CredentialManager {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct CREDENTIAL {
+        public uint   Flags;
+        public uint   Type;
+        public string TargetName;
+        public string Comment;
+        public long   LastWritten;
+        public uint   CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public uint   Persist;
+        public uint   AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
+    }
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CredRead(string target, uint type, int flags, out IntPtr ptr);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CredWrite([In] ref CREDENTIAL cred, uint flags);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CredDelete(string target, uint type, int flags);
+
+    [DllImport("advapi32.dll")]
+    private static extern void CredFree(IntPtr ptr);
+
+    public static string ReadUsername(string target) {
+        IntPtr ptr;
+        if (!CredRead(target, 1, 0, out ptr)) return null;
+        try {
+            var c = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
+            return c.UserName;
+        } finally { CredFree(ptr); }
+    }
+
+    public static string ReadPassword(string target) {
+        IntPtr ptr;
+        if (!CredRead(target, 1, 0, out ptr)) return null;
+        try {
+            var c = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
+            if (c.CredentialBlobSize == 0 || c.CredentialBlob == IntPtr.Zero) return string.Empty;
+            return Marshal.PtrToStringUni(c.CredentialBlob, (int)c.CredentialBlobSize / 2);
+        } finally { CredFree(ptr); }
+    }
+
+    public static bool WriteCredential(string target, string username, string password) {
+        byte[] blob = Encoding.Unicode.GetBytes(password);
+        IntPtr blobPtr = Marshal.AllocHGlobal(blob.Length);
+        try {
+            Marshal.Copy(blob, 0, blobPtr, blob.Length);
+            CREDENTIAL c = new CREDENTIAL();
+            c.Type               = 1;  // CRED_TYPE_GENERIC
+            c.TargetName         = target;
+            c.UserName           = username;
+            c.CredentialBlob     = blobPtr;
+            c.CredentialBlobSize = (uint)blob.Length;
+            c.Persist            = 2;  // CRED_PERSIST_LOCAL_MACHINE
+            return CredWrite(ref c, 0);
+        } finally { Marshal.FreeHGlobal(blobPtr); }
+    }
+
+    public static bool DeleteCredential(string target) {
+        IntPtr ptr;
+        if (!CredRead(target, 1, 0, out ptr)) return true;  // already absent — nothing to do
+        CredFree(ptr);
+        return CredDelete(target, 1, 0);
+    }
+}
+'@ -Language CSharp
+}
+
+# ---------------------------------------------
+# HELPER FUNCTION: Detect SSH authentication failure from stderr.
+# Returns $true when stderr contains a known credential-rejection pattern.
+# Timeouts, connectivity errors, and host-key issues do NOT match.
+# ---------------------------------------------
+function Test-IsAuthFailure {
+    param([string]$StdErr)
+    return ($StdErr -match 'Permission denied|Authentication failed')
+}
+
+# ---------------------------------------------
+# HELPER FUNCTION: Write/overwrite the SSH_ASKPASS .cmd helper.
+# Encapsulates cmd.exe special-character escaping so the same logic
+# can be called on initial setup and again after a credential update.
+# ---------------------------------------------
+function Set-AskPassScript {
+    param([string]$ScriptPath, [string]$Password)
+    $escaped = $Password
+    $escaped = $escaped.Replace('^', '^^')
+    $escaped = $escaped.Replace('&', '^&')
+    $escaped = $escaped.Replace('|', '^|')
+    $escaped = $escaped.Replace('<', '^<')
+    $escaped = $escaped.Replace('>', '^>')
+    $escaped = $escaped.Replace('!', '^!')
+    $escaped = $escaped.Replace('%', '%%')
+    Set-Content -Path $ScriptPath -Value "@echo $escaped" -Force
 }
 
 # ---------------------------------------------
@@ -383,6 +524,7 @@ function Invoke-SSHSession {
         Status         = "Unknown"
         LogFile        = ""
         Error          = ""
+        AuthFailed     = $false   # $true only when SSH returns a credential-rejection error
         Duration       = [TimeSpan]::Zero
         Timestamp      = ""   # completion timestamp, set in finally block
         CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -638,6 +780,7 @@ function Invoke-SSHSession {
                     $result.Error = $err
                 }
             }
+            $result.AuthFailed = Test-IsAuthFailure -StdErr $stdErr
         }
         else {
             $result.Status = "Success"
@@ -753,6 +896,9 @@ $devCountStr = "$($devices.Count)".PadRight(37)
 $cmdCountStr = "$($commands.Count)".PadRight(37)
 $timeoutStr = "${TimeoutSeconds}s".PadRight(37)
 $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
+$credLabelStr = $CredentialLabel
+if ($credLabelStr.Length -gt 37) { $credLabelStr = $credLabelStr.Substring(0, 34) + "..." }
+$credLabelStr = $credLabelStr.PadRight(37)
 if ($LogEnabled) {
     $logDirStr = $LogDirectory
     if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
@@ -777,6 +923,7 @@ Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
 Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
+Write-Host "|  SSH Creds: ${credLabelStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
 Write-Host "|  JSON Dir : ${jsonDirStr}|" -ForegroundColor Gray
 Write-Host "|  Netcortex: ${netcortexDirStr}|" -ForegroundColor Gray
@@ -789,29 +936,68 @@ if ($ExtraSSHOptions.Count -gt 0) {
 Write-Host "+==================================================+" -ForegroundColor Gray
 Write-Host ""
 
-$results = [System.Collections.Generic.List[PSCustomObject]]::new()
-$deviceNum = 0
+$results        = [System.Collections.Generic.List[PSCustomObject]]::new()
+$deviceNum      = 0
+$authRetryCount = 0
+$maxAuthRetries = 3
 
 foreach ($ip in $devices) {
     $deviceNum++
     Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ... " -NoNewline
 
-    $sessionResult = Invoke-SSHSession `
-        -IPAddress     $ip `
-        -User          $username `
-        -CommandList   $commands `
-        -Timeout       $TimeoutSeconds `
-        -SSHOptions    $ExtraSSHOptions `
-        -CmdDelayMs    $CommandDelayMs `
-        -CmdTimeoutSec $CommandTimeoutSeconds
+    # Auth retry loop — retries the same device when credentials are rejected.
+    # Non-auth failures (timeout, connectivity) break out immediately.
+    do {
+        $sessionResult = Invoke-SSHSession `
+            -IPAddress     $ip `
+            -User          $username `
+            -CommandList   $commands `
+            -Timeout       $TimeoutSeconds `
+            -SSHOptions    $ExtraSSHOptions `
+            -CmdDelayMs    $CommandDelayMs `
+            -CmdTimeoutSec $CommandTimeoutSeconds
+
+        if ($sessionResult.AuthFailed) {
+            $authRetryCount++
+            Write-Host ""
+            Write-Host "  Authentication rejected by $ip." -ForegroundColor Red
+
+            if ($authRetryCount -ge $maxAuthRetries) {
+                Write-Host "  ERROR: Credentials rejected $maxAuthRetries consecutive time(s). Aborting." -ForegroundColor Red
+                try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                $password = $null
+                [System.GC]::Collect()
+                exit 1
+            }
+
+            Write-Host "  Retry $authRetryCount of $($maxAuthRetries - 1) — please enter updated credentials." -ForegroundColor Yellow
+            $credential       = Get-Credential -Message "Credentials rejected — enter new credentials (retry $authRetryCount of $($maxAuthRetries - 1))"
+            $username         = $credential.UserName
+            $password         = $credential.GetNetworkCredential().Password
+            $credentialsSaved = $false   # new credentials must be saved after next success
+            Set-AskPassScript -ScriptPath $askPassScript -Password $password
+
+            Write-Host "[$deviceNum/$($devices.Count)] Retrying $ip ... " -NoNewline
+        }
+    } while ($sessionResult.AuthFailed)
 
     if ($sessionResult.Status -eq "Success") {
         Write-Host "OK " -ForegroundColor Green -NoNewline
         Write-Host "($($sessionResult.DeviceName)) [$($sessionResult.Duration.TotalSeconds.ToString('0.0'))s]"
+
+        # Persist credentials to Credential Manager after the first verified success.
+        if (-not $credentialsSaved) {
+            if ([CredentialManager]::WriteCredential($CredentialLabel, $username, $password)) {
+                Write-Verbose "Credentials saved to Credential Manager (label: $CredentialLabel)."
+            }
+            $credentialsSaved = $true
+        }
+        $authRetryCount = 0   # reset consecutive failure counter on any successful connection
     }
     else {
         Write-Host "FAILED: " -ForegroundColor Red -NoNewline
         Write-Host "$($sessionResult.Error)" -ForegroundColor DarkRed
+        # Non-auth failures (timeouts, connectivity) do not consume the retry budget.
     }
 
     $results.Add($sessionResult)
