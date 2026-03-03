@@ -491,6 +491,10 @@ function Invoke-SSHSession {
             # $stdOutBuilder continues to receive the formatted log content unchanged.
             $cmdOutputBuilder = [System.Text.StringBuilder]::new()
 
+            # Capture the current prompt before Read-UntilPrompt overwrites $lastPrompt.
+            # Stored per-command so the nexus output can reconstruct the prompt+command
+            # echo line (e.g. "cs3850x-1#term len 0") without re-parsing raw output.
+            $cmdPrompt = $lastPrompt
             $lastPrompt = ""
             if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
                 $proc.Kill()
@@ -507,6 +511,7 @@ function Invoke-SSHSession {
             $rawLines = $cmdOutputBuilder.ToString() -split "`r?`n"
             $result.CommandResults.Add([PSCustomObject]@{
                     command    = $cmd
+                    prompt     = $cmdPrompt
                     raw_output = [string[]]$rawLines
                 })
 
@@ -730,9 +735,18 @@ foreach ($r in $successResults) {
     $safeIP     = ConvertTo-SafeFileName $r.IPAddress
     $nexusFile  = Join-Path $NexusDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
 
-    $nexusLines = foreach ($cr in $r.CommandResults) {
-        $cr.command
-        $cr.raw_output
+    # Build nexus content: prompt+command echo, raw output, bare prompt separator.
+    # Trailing blank lines are stripped from each command's output so the bare
+    # prompt lands immediately after the last non-empty output line — giving the
+    # downstream ingest a clean prompt-delimited structure with no ambiguous blanks.
+    $nexusLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($cr in $r.CommandResults) {
+        $nexusLines.Add("$($cr.prompt)$($cr.command)")
+        $outLines = @($cr.raw_output)
+        $trimIdx  = $outLines.Count - 1
+        while ($trimIdx -ge 0 -and [string]::IsNullOrEmpty($outLines[$trimIdx])) { $trimIdx-- }
+        for ($i = 0; $i -le $trimIdx; $i++) { $nexusLines.Add($outLines[$i]) }
+        $nexusLines.Add($cr.prompt)
     }
     Set-Content -Path $nexusFile -Value ($nexusLines -join "`r`n") -Encoding UTF8
     Write-Host "Nexus output: $nexusFile" -ForegroundColor Cyan
