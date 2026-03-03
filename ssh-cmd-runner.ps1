@@ -33,6 +33,13 @@
     the device can process them. *Default is 0ms*. Increase for slower
     devices or commands that produce large output.
 
+.PARAMETER CommandTimeoutSeconds
+    Maximum time in seconds to wait for a device to return its prompt after each
+    command is sent. This covers device processing time plus the time to transmit
+    all output lines. Increase this for commands with large output (e.g. show
+    interface on a chassis with many ports). Default is 30.
+    Note: -TimeoutSeconds controls only the initial SSH connection handshake.
+
 .PARAMETER JsonDirectory
     Directory where the JSON output file will be saved. Created automatically if it doesn't exist.
     The filename uses the format ssh-output-<timestamp>.json so successive runs never overwrite
@@ -97,6 +104,10 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Delay in milliseconds between sending each command to the device (default 500)")]
     [ValidateRange(100, 10000)]
     [int]$CommandDelayMs = 500,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait for device prompt after each command (default 30). Increase for commands with large output.")]
+    [ValidateRange(5, 600)]
+    [int]$CommandTimeoutSeconds = 30,
 
     [Parameter(Mandatory = $false, HelpMessage = "Directory where the JSON output file will be saved. Created automatically if it doesn't exist.")]
     [string]$JsonDirectory = ".\json",
@@ -303,7 +314,8 @@ function Invoke-SSHSession {
         [string[]]$CommandList,
         [int]$Timeout,
         [string[]]$SSHOptions = @(),
-        [int]$CmdDelayMs = 500
+        [int]$CmdDelayMs = 500,
+        [int]$CmdTimeoutSec = 30
     )
 
     $result = [PSCustomObject]@{
@@ -435,7 +447,7 @@ function Invoke-SSHSession {
 
         # Wait for the initial device prompt before sending any commands.
         # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
-        $perCmdTimeoutMs = $Timeout * 1000
+        $perCmdTimeoutMs = $CmdTimeoutSec * 1000
         $lastPrompt = ""
         if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
             $proc.Kill()
@@ -535,7 +547,7 @@ function Invoke-SSHSession {
         # settle delays + post-drain + 15s margin. Under normal operation the process
         # will have already exited by the time this is reached.
         $overallTimeoutMs = ($Timeout * 1000) +
-        ($CommandList.Count * $Timeout * 1000) +
+        ($CommandList.Count * $CmdTimeoutSec * 1000) +
         ($CommandList.Count * $CmdDelayMs) +
         15000
         $exited = $proc.WaitForExit($overallTimeoutMs)
@@ -590,11 +602,12 @@ function Invoke-SSHSession {
         # Build log content using string array (avoids here-string indentation issues)
         $logLines = @(
             $separator
-            " Device  : $deviceName ($IPAddress)"
-            " User    : $User"
-            " Date    : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-            " Status  : $($result.Status)"
-            " Timeout : ${Timeout}s"
+            " Device    : $deviceName ($IPAddress)"
+            " User      : $User"
+            " Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            " Status    : $($result.Status)"
+            " Conn Tmout: ${Timeout}s"
+            " Cmd Tmout : ${CmdTimeoutSec}s"
             $separator
             ""
             "$thinSep COMMANDS SENT $thinSep"
@@ -625,15 +638,22 @@ function Invoke-SSHSession {
 
         $failLines = @(
             $separator
-            " Device  : unknown ($IPAddress)"
-            " User    : $User"
-            " Date    : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-            " Status  : FAILED"
-            " Timeout : ${Timeout}s"
+            " Device    : unknown ($IPAddress)"
+            " User      : $User"
+            " Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            " Status    : FAILED"
+            " Conn Tmout: ${Timeout}s"
+            " Cmd Tmout : ${CmdTimeoutSec}s"
             $separator
             ""
             "ERROR: $($_.Exception.Message)"
         )
+
+        if ($null -ne $stdOutBuilder -and $stdOutBuilder.Length -gt 0) {
+            $failLines += ""
+            $failLines += "$thinSep PARTIAL OUTPUT (before failure) $thinSep"
+            $failLines += $stdOutBuilder.ToString()
+        }
 
         Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
     }
@@ -669,6 +689,7 @@ function Invoke-SSHSession {
 $devCountStr = "$($devices.Count)".PadRight(37)
 $cmdCountStr = "$($commands.Count)".PadRight(37)
 $timeoutStr = "${TimeoutSeconds}s".PadRight(37)
+$cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
 $logDirStr = $LogDirectory
 if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
 $logDirStr = $logDirStr.PadRight(37)
@@ -686,6 +707,7 @@ Write-Host "+==================================================+" -ForegroundCol
 Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
 Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
+Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
 Write-Host "|  JSON Dir : ${jsonDirStr}|" -ForegroundColor Gray
 Write-Host "|  Nexus Dir: ${nexusDirStr}|" -ForegroundColor Gray
@@ -706,12 +728,13 @@ foreach ($ip in $devices) {
     Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ... " -NoNewline
 
     $sessionResult = Invoke-SSHSession `
-        -IPAddress   $ip `
-        -User        $username `
-        -CommandList $commands `
-        -Timeout     $TimeoutSeconds `
-        -SSHOptions  $ExtraSSHOptions `
-        -CmdDelayMs  $CommandDelayMs
+        -IPAddress     $ip `
+        -User          $username `
+        -CommandList   $commands `
+        -Timeout       $TimeoutSeconds `
+        -SSHOptions    $ExtraSSHOptions `
+        -CmdDelayMs    $CommandDelayMs `
+        -CmdTimeoutSec $CommandTimeoutSeconds
 
     if ($sessionResult.Status -eq "Success") {
         Write-Host "OK " -ForegroundColor Green -NoNewline
@@ -732,8 +755,8 @@ $successResults = @($results | Where-Object { $_.Status -eq "Success" })
 
 foreach ($r in $successResults) {
     $safeDevice = ConvertTo-SafeFileName $r.DeviceName
-    $safeIP     = ConvertTo-SafeFileName $r.IPAddress
-    $nexusFile  = Join-Path $NexusDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
+    $safeIP = ConvertTo-SafeFileName $r.IPAddress
+    $nexusFile = Join-Path $NexusDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
 
     # Build nexus content: prompt+command echo, raw output, bare prompt separator.
     # Trailing blank lines are stripped from each command's output so the bare
@@ -743,7 +766,7 @@ foreach ($r in $successResults) {
     foreach ($cr in $r.CommandResults) {
         $nexusLines.Add("$($cr.prompt)$($cr.command)")
         $outLines = @($cr.raw_output)
-        $trimIdx  = $outLines.Count - 1
+        $trimIdx = $outLines.Count - 1
         while ($trimIdx -ge 0 -and [string]::IsNullOrEmpty($outLines[$trimIdx])) { $trimIdx-- }
         for ($i = 0; $i -le $trimIdx; $i++) { $nexusLines.Add($outLines[$i]) }
         $nexusLines.Add($cr.prompt)
