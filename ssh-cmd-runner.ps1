@@ -261,99 +261,8 @@ if ($commands.Count -eq 0) {
 }
 
 # ---------------------------------------------
-# CREDENTIAL MANAGEMENT
-# Precedence: Windows Credential Manager > interactive prompt.
-# Credentials are written to Credential Manager only after a successful
-# device connection confirms they work. ClearCredentials forces a fresh
-# prompt and removes any stored entry before looking up new ones.
-# ---------------------------------------------
-Write-Host ""
-
-if ($ClearCredentials) {
-    [CredentialManager]::DeleteCredential($CredentialLabel) | Out-Null
-    Write-Host "Stored credentials for '$CredentialLabel' cleared." -ForegroundColor Yellow
-}
-
-$storedUsername = [CredentialManager]::ReadUsername($CredentialLabel)
-$storedPassword = [CredentialManager]::ReadPassword($CredentialLabel)
-
-if ($storedUsername -and $null -ne $storedPassword -and -not $ClearCredentials) {
-    $username         = $storedUsername
-    $password         = $storedPassword
-    $credentialsSaved = $true   # already in Credential Manager — no re-save needed
-    Write-Host "Using stored credentials for '$username' (label: $CredentialLabel)." -ForegroundColor Cyan
-}
-else {
-    $credential       = Get-Credential -Message "Enter SSH credentials for network devices"
-    $username         = $credential.UserName
-    $password         = $credential.GetNetworkCredential().Password
-    $credentialsSaved = $false  # freshly entered — save after first verified success
-}
-
-# ---------------------------------------------
-# SSH_ASKPASS HELPER
-# Creates a temporary .cmd script that ssh.exe calls to retrieve the
-# password, avoiding interactive prompts per device. Set-AskPassScript
-# handles cmd.exe special-character escaping and is called again
-# whenever credentials are updated mid-run.
-# ---------------------------------------------
-$askPassDir    = Join-Path $env:TEMP "ssh_askpass_$timestamp"
-New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
-$askPassScript = Join-Path $askPassDir "askpass.cmd"
-Set-AskPassScript -ScriptPath $askPassScript -Password $password
-
-# ---------------------------------------------
-# HELPER FUNCTION: Parse device hostname from SSH output
-# Matches common network device prompt patterns:
-#   Cisco IOS/NX-OS  :  hostname#  hostname>  hostname(config)#
-#   Arista EOS       :  hostname#  hostname>  hostname(config)#
-#   Juniper JunOS    :  user@hostname>  user@hostname#
-#   Palo Alto        :  user@hostname>  user@hostname#
-#   HP/Aruba         :  hostname#  hostname>
-#   Linux-based NOS  :  user@hostname:~$  [user@hostname ~]$
-# ---------------------------------------------
-function Get-HostnameFromPrompt {
-    param([string]$Output)
-
-    $lines = $Output -split "`r?`n"
-
-    foreach ($line in $lines) {
-        $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-
-        # Juniper / PAN style: user@hostname> or user@hostname# or user@hostname:~$
-        if ($trimmed -match '^\S*?@([A-Za-z0-9_-]+)[>#:\$%]') {
-            return $Matches[1]
-        }
-
-        # Cisco / Arista / HP style: hostname# or hostname> or hostname(config-xxx)#
-        if ($trimmed -match '^([A-Za-z][A-Za-z0-9._-]*)(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$') {
-            $candidate = $Matches[1]
-            $falsePositives = @('yes', 'no', 'ok', 'error', 'warning', 'info', 'true', 'false')
-            if ($candidate.Length -ge 2 -and $candidate.ToLower() -notin $falsePositives) {
-                return $candidate
-            }
-        }
-
-        # Linux-style: [user@hostname ~]$ or [user@hostname ~]#
-        if ($trimmed -match '^\[?\S+?@([A-Za-z0-9_-]+)\s') {
-            return $Matches[1]
-        }
-    }
-
-    return $null
-}
-
-# ---------------------------------------------
-# HELPER FUNCTION: Sanitize strings for filenames
-# ---------------------------------------------
-function ConvertTo-SafeFileName {
-    param([string]$InputString)
-    return ($InputString -replace '[\\/:*?"<>|]', '_')
-}
-
-# ---------------------------------------------
 # CREDENTIAL MANAGER (Windows native P/Invoke — no external modules)
+# Must be defined before the credential management block that calls it.
 # ---------------------------------------------
 if (-not ([System.Management.Automation.PSTypeName]'CredentialManager').Type) {
     Add-Type -TypeDefinition @'
@@ -461,6 +370,98 @@ function Set-AskPassScript {
     $escaped = $escaped.Replace('!', '^!')
     $escaped = $escaped.Replace('%', '%%')
     Set-Content -Path $ScriptPath -Value "@echo $escaped" -Force
+}
+
+# ---------------------------------------------
+# CREDENTIAL MANAGEMENT
+# Precedence: Windows Credential Manager > interactive prompt.
+# Credentials are written to Credential Manager only after a successful
+# device connection confirms they work. ClearCredentials forces a fresh
+# prompt and removes any stored entry before looking up new ones.
+# ---------------------------------------------
+Write-Host ""
+
+if ($ClearCredentials) {
+    [CredentialManager]::DeleteCredential($CredentialLabel) | Out-Null
+    Write-Host "Stored credentials for '$CredentialLabel' cleared." -ForegroundColor Yellow
+}
+
+$storedUsername = [CredentialManager]::ReadUsername($CredentialLabel)
+$storedPassword = [CredentialManager]::ReadPassword($CredentialLabel)
+
+if ($storedUsername -and $null -ne $storedPassword -and -not $ClearCredentials) {
+    $username         = $storedUsername
+    $password         = $storedPassword
+    $credentialsSaved = $true   # already in Credential Manager — no re-save needed
+    Write-Host "Using stored credentials for '$username' (label: $CredentialLabel)." -ForegroundColor Cyan
+}
+else {
+    $credential       = Get-Credential -Message "Enter SSH credentials for network devices"
+    $username         = $credential.UserName
+    $password         = $credential.GetNetworkCredential().Password
+    $credentialsSaved = $false  # freshly entered — save after first verified success
+}
+
+# ---------------------------------------------
+# SSH_ASKPASS HELPER
+# Creates a temporary .cmd script that ssh.exe calls to retrieve the
+# password, avoiding interactive prompts per device. Set-AskPassScript
+# handles cmd.exe special-character escaping and is called again
+# whenever credentials are updated mid-run.
+# ---------------------------------------------
+$askPassDir    = Join-Path $env:TEMP "ssh_askpass_$timestamp"
+New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
+$askPassScript = Join-Path $askPassDir "askpass.cmd"
+Set-AskPassScript -ScriptPath $askPassScript -Password $password
+
+# ---------------------------------------------
+# HELPER FUNCTION: Parse device hostname from SSH output
+# Matches common network device prompt patterns:
+#   Cisco IOS/NX-OS  :  hostname#  hostname>  hostname(config)#
+#   Arista EOS       :  hostname#  hostname>  hostname(config)#
+#   Juniper JunOS    :  user@hostname>  user@hostname#
+#   Palo Alto        :  user@hostname>  user@hostname#
+#   HP/Aruba         :  hostname#  hostname>
+#   Linux-based NOS  :  user@hostname:~$  [user@hostname ~]$
+# ---------------------------------------------
+function Get-HostnameFromPrompt {
+    param([string]$Output)
+
+    $lines = $Output -split "`r?`n"
+
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+        # Juniper / PAN style: user@hostname> or user@hostname# or user@hostname:~$
+        if ($trimmed -match '^\S*?@([A-Za-z0-9_-]+)[>#:\$%]') {
+            return $Matches[1]
+        }
+
+        # Cisco / Arista / HP style: hostname# or hostname> or hostname(config-xxx)#
+        if ($trimmed -match '^([A-Za-z][A-Za-z0-9._-]*)(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$') {
+            $candidate = $Matches[1]
+            $falsePositives = @('yes', 'no', 'ok', 'error', 'warning', 'info', 'true', 'false')
+            if ($candidate.Length -ge 2 -and $candidate.ToLower() -notin $falsePositives) {
+                return $candidate
+            }
+        }
+
+        # Linux-style: [user@hostname ~]$ or [user@hostname ~]#
+        if ($trimmed -match '^\[?\S+?@([A-Za-z0-9_-]+)\s') {
+            return $Matches[1]
+        }
+    }
+
+    return $null
+}
+
+# ---------------------------------------------
+# HELPER FUNCTION: Sanitize strings for filenames
+# ---------------------------------------------
+function ConvertTo-SafeFileName {
+    param([string]$InputString)
+    return ($InputString -replace '[\\/:*?"<>|]', '_')
 }
 
 # ---------------------------------------------
