@@ -52,6 +52,18 @@
     convention: DeviceName_IPAddress_Timestamp.txt. Failed connections are skipped.
     Default is .\nexus.
 
+.PARAMETER LogEnabled
+    Enable or disable log output files. When $false, no .log files are written to LogDirectory.
+    Default is $true.
+
+.PARAMETER JsonEnabled
+    Enable or disable JSON output files. When $false, no session or per-device .json files
+    are written to JsonDirectory. Default is $false.
+
+.PARAMETER NexusEnabled
+    Enable or disable Nexus raw output text files. When $false, no .txt files are written
+    to NexusDirectory. Default is $false.
+
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
 
@@ -114,8 +126,57 @@ param(
     [string]$JsonDirectory = ".\json",
 
     [Parameter(Mandatory = $false, HelpMessage = "Directory where per-device raw output text files will be saved. Created automatically if it doesn't exist.")]
-    [string]$NexusDirectory = ".\nexus"
+    [string]$NexusDirectory = ".\nexus",
+
+    [Parameter(Mandatory = $false, HelpMessage = "Enable or disable log output files (default: true)")]
+    [bool]$LogEnabled = $true,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Enable or disable JSON output files (default: false)")]
+    [bool]$JsonEnabled = $false,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Enable or disable Nexus raw output files (default: false)")]
+    [bool]$NexusEnabled = $false
 )
+
+# ---------------------------------------------
+# CONFIG FILE LOADING
+# Precedence: CLI args > config.json > param() defaults
+# ---------------------------------------------
+$configPath = Join-Path $PSScriptRoot "config.json"
+
+if (Test-Path $configPath -PathType Leaf) {
+    try {
+        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-Host "ERROR: config.json could not be parsed: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+
+    $requiredKeys = @(
+        'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
+        'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds',
+        'JsonDirectory', 'NexusDirectory', 'LogEnabled', 'JsonEnabled', 'NexusEnabled'
+    )
+    $missingKeys = $requiredKeys | Where-Object { $config.PSObject.Properties.Name -notcontains $_ }
+    if ($missingKeys.Count -gt 0) {
+        Write-Host "ERROR: config.json is missing required parameter(s): $($missingKeys -join ', ')" -ForegroundColor Red
+        exit 1
+    }
+
+    if (-not $PSBoundParameters.ContainsKey('DeviceListFile'))        { $DeviceListFile        = $config.DeviceListFile }
+    if (-not $PSBoundParameters.ContainsKey('CommandsFile'))          { $CommandsFile          = $config.CommandsFile }
+    if (-not $PSBoundParameters.ContainsKey('LogDirectory'))          { $LogDirectory          = $config.LogDirectory }
+    if (-not $PSBoundParameters.ContainsKey('TimeoutSeconds'))        { $TimeoutSeconds        = [int]$config.TimeoutSeconds }
+    if (-not $PSBoundParameters.ContainsKey('ExtraSSHOptions'))       { $ExtraSSHOptions       = [string[]]$config.ExtraSSHOptions }
+    if (-not $PSBoundParameters.ContainsKey('CommandDelayMs'))        { $CommandDelayMs        = [int]$config.CommandDelayMs }
+    if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds')) { $CommandTimeoutSeconds = [int]$config.CommandTimeoutSeconds }
+    if (-not $PSBoundParameters.ContainsKey('JsonDirectory'))         { $JsonDirectory         = $config.JsonDirectory }
+    if (-not $PSBoundParameters.ContainsKey('NexusDirectory'))        { $NexusDirectory        = $config.NexusDirectory }
+    if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
+    if (-not $PSBoundParameters.ContainsKey('JsonEnabled'))           { $JsonEnabled           = [bool]$config.JsonEnabled }
+    if (-not $PSBoundParameters.ContainsKey('NexusEnabled'))          { $NexusEnabled          = [bool]$config.NexusEnabled }
+}
 
 # ---------------------------------------------
 # INITIALIZE
@@ -147,17 +208,17 @@ if (-not $sshPath) {
 Write-Verbose "Using SSH client: $($sshPath.Source)"
 
 # Create log directory
-if (-not (Test-Path $LogDirectory)) {
+if ($LogEnabled -and -not (Test-Path $LogDirectory)) {
     New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
 }
 
 # Create JSON output directory
-if (-not (Test-Path $JsonDirectory)) {
+if ($JsonEnabled -and -not (Test-Path $JsonDirectory)) {
     New-Item -ItemType Directory -Path $JsonDirectory -Force | Out-Null
 }
 
 # Create nexus output directory
-if (-not (Test-Path $NexusDirectory)) {
+if ($NexusEnabled -and -not (Test-Path $NexusDirectory)) {
     New-Item -ItemType Directory -Path $NexusDirectory -Force | Out-Null
 }
 
@@ -621,7 +682,9 @@ function Invoke-SSHSession {
             $logLines += $stdErr
         }
 
-        Set-Content -Path $logFilePath -Value ($logLines -join "`r`n") -Encoding UTF8
+        if ($LogEnabled) {
+            Set-Content -Path $logFilePath -Value ($logLines -join "`r`n") -Encoding UTF8
+        }
     }
     catch {
         $result.Status = "Failed"
@@ -653,7 +716,9 @@ function Invoke-SSHSession {
             $failLines += $stdOutBuilder.ToString()
         }
 
-        Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
+        if ($LogEnabled) {
+            Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
+        }
     }
     finally {
         $sw.Stop()
@@ -688,15 +753,21 @@ $devCountStr = "$($devices.Count)".PadRight(37)
 $cmdCountStr = "$($commands.Count)".PadRight(37)
 $timeoutStr = "${TimeoutSeconds}s".PadRight(37)
 $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
-$logDirStr = $LogDirectory
-if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
-$logDirStr = $logDirStr.PadRight(37)
-$jsonDirStr = $JsonDirectory
-if ($jsonDirStr.Length -gt 37) { $jsonDirStr = $jsonDirStr.Substring(0, 34) + "..." }
-$jsonDirStr = $jsonDirStr.PadRight(37)
-$nexusDirStr = $NexusDirectory
-if ($nexusDirStr.Length -gt 37) { $nexusDirStr = $nexusDirStr.Substring(0, 34) + "..." }
-$nexusDirStr = $nexusDirStr.PadRight(37)
+if ($LogEnabled) {
+    $logDirStr = $LogDirectory
+    if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
+    $logDirStr = $logDirStr.PadRight(37)
+} else { $logDirStr = "Disabled".PadRight(37) }
+if ($JsonEnabled) {
+    $jsonDirStr = $JsonDirectory
+    if ($jsonDirStr.Length -gt 37) { $jsonDirStr = $jsonDirStr.Substring(0, 34) + "..." }
+    $jsonDirStr = $jsonDirStr.PadRight(37)
+} else { $jsonDirStr = "Disabled".PadRight(37) }
+if ($NexusEnabled) {
+    $nexusDirStr = $NexusDirectory
+    if ($nexusDirStr.Length -gt 37) { $nexusDirStr = $nexusDirStr.Substring(0, 34) + "..." }
+    $nexusDirStr = $nexusDirStr.PadRight(37)
+} else { $nexusDirStr = "Disabled".PadRight(37) }
 
 Write-Host ""
 Write-Host "+==================================================+" -ForegroundColor Gray
@@ -747,79 +818,85 @@ foreach ($ip in $devices) {
 }
 
 # ---------------------------------------------
-# NEXUS OUTPUT
+# OUTPUT AGGREGATES
 # ---------------------------------------------
 $successResults = @($results | Where-Object { $_.Status -eq "Success" })
+$failedIPs      = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
 
-foreach ($r in $successResults) {
-    $safeDevice = ConvertTo-SafeFileName $r.DeviceName
-    $safeIP = ConvertTo-SafeFileName $r.IPAddress
-    $nexusFile = Join-Path $NexusDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
+# ---------------------------------------------
+# NEXUS OUTPUT
+# ---------------------------------------------
+if ($NexusEnabled) {
+    foreach ($r in $successResults) {
+        $safeDevice = ConvertTo-SafeFileName $r.DeviceName
+        $safeIP = ConvertTo-SafeFileName $r.IPAddress
+        $nexusFile = Join-Path $NexusDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
 
-    # Build nexus content: prompt+command echo, raw output, bare prompt separator.
-    # Trailing blank lines are stripped from each command's output so the bare
-    # prompt lands immediately after the last non-empty output line — giving the
-    # downstream ingest a clean prompt-delimited structure with no ambiguous blanks.
-    $nexusLines = [System.Collections.Generic.List[string]]::new()
-    foreach ($cr in $r.CommandResults) {
-        $nexusLines.Add("$($cr.prompt)$($cr.command)")
-        $outLines = @($cr.raw_output)
-        $trimIdx = $outLines.Count - 1
-        while ($trimIdx -ge 0 -and [string]::IsNullOrEmpty($outLines[$trimIdx])) { $trimIdx-- }
-        for ($i = 0; $i -le $trimIdx; $i++) { $nexusLines.Add($outLines[$i]) }
-        $nexusLines.Add($cr.prompt)
+        # Build nexus content: prompt+command echo, raw output, bare prompt separator.
+        # Trailing blank lines are stripped from each command's output so the bare
+        # prompt lands immediately after the last non-empty output line — giving the
+        # downstream ingest a clean prompt-delimited structure with no ambiguous blanks.
+        $nexusLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($cr in $r.CommandResults) {
+            $nexusLines.Add("$($cr.prompt)$($cr.command)")
+            $outLines = @($cr.raw_output)
+            $trimIdx = $outLines.Count - 1
+            while ($trimIdx -ge 0 -and [string]::IsNullOrEmpty($outLines[$trimIdx])) { $trimIdx-- }
+            for ($i = 0; $i -le $trimIdx; $i++) { $nexusLines.Add($outLines[$i]) }
+            $nexusLines.Add($cr.prompt)
+        }
+        Set-Content -Path $nexusFile -Value ($nexusLines -join "`r`n") -Encoding UTF8
     }
-    Set-Content -Path $nexusFile -Value ($nexusLines -join "`r`n") -Encoding UTF8
 }
 
 # ---------------------------------------------
 # JSON OUTPUT
 # ---------------------------------------------
-$failedIPs = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
-
-# --- Session summary file ---
-$sessionDoc = [ordered]@{
-    platform = $osPlatform
-    engine   = $psEngine
-    date     = $runDate
-    result   = [ordered]@{
-        total   = $results.Count
-        success = $successResults.Count
-        failed  = $failedIPs.Count
+if ($JsonEnabled) {
+    # --- Session summary file ---
+    $sessionDoc = [ordered]@{
+        platform = $osPlatform
+        engine   = $psEngine
+        date     = $runDate
+        result   = [ordered]@{
+            total   = $results.Count
+            success = $successResults.Count
+            failed  = $failedIPs.Count
+        }
+        devices  = [ordered]@{
+            count               = $results.Count
+            ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
+            failed_ip_addresses = @($failedIPs)
+        }
+        commands = [ordered]@{
+            count = $commands.Count
+            list  = @($commands)
+        }
     }
-    devices  = [ordered]@{
-        count               = $results.Count
-        ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
-        failed_ip_addresses = @($failedIPs)
-    }
-    commands = [ordered]@{
-        count = $commands.Count
-        list  = @($commands)
-    }
-}
-$sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
-$sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
+    $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
+    $sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
 
-# --- Per-device JSON files (successful connections only) ---
-foreach ($r in $successResults) {
-    $safeDevice = ConvertTo-SafeFileName $r.DeviceName
-    $safeIP     = ConvertTo-SafeFileName $r.IPAddress
-    $devicePath = Join-Path $JsonDirectory "${safeDevice}_${safeIP}_${timestamp}.json"
+    # --- Per-device JSON files (successful connections only) ---
+    foreach ($r in $successResults) {
+        $safeDevice = ConvertTo-SafeFileName $r.DeviceName
+        $safeIP     = ConvertTo-SafeFileName $r.IPAddress
+        $devicePath = Join-Path $JsonDirectory "${safeDevice}_${safeIP}_${timestamp}.json"
 
-    $deviceDoc = [ordered]@{
-        name      = $r.DeviceName
-        ip        = $r.IPAddress
-        timestamp = $r.Timestamp
-        commands  = @(
-            $r.CommandResults | ForEach-Object {
-                [ordered]@{
-                    command    = $_.command
-                    raw_output = @($_.raw_output)
+        $deviceDoc = [ordered]@{
+            name      = $r.DeviceName
+            ip        = $r.IPAddress
+            timestamp = $r.Timestamp
+            commands  = @(
+                $r.CommandResults | ForEach-Object {
+                    [ordered]@{
+                        command    = $_.command
+                        raw_output = @($_.raw_output)
+                    }
                 }
-            }
-        )
+            )
+        }
+        $deviceDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $devicePath -Encoding UTF8
     }
-    $deviceDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $devicePath -Encoding UTF8
 }
 
 # ---------------------------------------------

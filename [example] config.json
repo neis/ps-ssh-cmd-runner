@@ -1,0 +1,14 @@
+{
+    "DeviceListFile": "./devices.txt",
+    "CommandsFile": "./commands.txt",
+    "LogDirectory": "./logs",
+    "TimeoutSeconds": 10,
+    "ExtraSSHOptions": [],
+    "CommandDelayMs": 500,
+    "CommandTimeoutSeconds": 30,
+    "JsonDirectory": "./json",
+    "NexusDirectory": "./nexus",
+    "LogEnabled": true,
+    "JsonEnabled": false,
+    "NexusEnabled": false
+}

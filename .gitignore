@@ -3,6 +3,9 @@ logs/
 json/
 nexus/
 
+# Ignore config file (use [example] config.json as a reference)
+config.json
+
 # Ignore common input file names
 commands.txt
 devices.txt
