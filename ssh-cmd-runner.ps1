@@ -1233,30 +1233,10 @@ if ($CompressOutput) {
         }
         $archivePath = Join-Path $PSScriptRoot $archiveName
 
-        # Normalize the script root once; guard against empty $PSScriptRoot (e.g. dot-sourced).
-        # A trailing separator is appended so that StartsWith cannot produce false positives:
-        #   "C:\foo Extra\bar".StartsWith("C:\foo")  → true  (WRONG, no separator)
-        #   "C:\foo Extra\bar".StartsWith("C:\foo\") → false (correct)
-        $scriptRoot      = if ($PSScriptRoot) { [System.IO.Path]::GetFullPath($PSScriptRoot) } else { $PWD.Path }
-        $scriptRootSlash = $scriptRoot.TrimEnd('\') + '\'
-
-        # Resolve each configured output directory to a fully-normalised absolute path.
-        # Relative paths (e.g. "./logs") are anchored to the script root via GetFullPath,
-        # which removes any "." or ".." segments.
-        # Absolute paths outside the script root are rejected by the StartsWith guard.
-        # Empty directories (no files) are excluded from the archive.
-        $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) | ForEach-Object {
-            if ([System.IO.Path]::IsPathRooted($_)) {
-                [System.IO.Path]::GetFullPath($_)
-            } else {
-                [System.IO.Path]::GetFullPath((Join-Path $scriptRoot $_))
-            }
-        } | Where-Object {
-            $_.StartsWith($scriptRootSlash, [System.StringComparison]::OrdinalIgnoreCase) -and
-            (Test-Path $_ -PathType Container) -and
-            (Get-ChildItem -Path $_ -Recurse -File -ErrorAction SilentlyContinue |
-             Select-Object -First 1)
-        }
+        # Collect all configured output directories that currently exist on disk.
+        # Includes directories from disabled output types if they exist from prior runs.
+        $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) |
+            Where-Object { Test-Path $_ -PathType Container }
 
         Write-Host ""
         if ($dirsToArchive.Count -eq 0) {
@@ -1269,24 +1249,8 @@ if ($CompressOutput) {
             $archiveSuccess = $false
             try {
                 if ($sevenZipExe) {
-                    # The script runs with $ErrorActionPreference = 'Stop'. 7-Zip writes
-                    # diagnostic text to stderr even on a fully successful run. PowerShell
-                    # wraps native-command stderr as ErrorRecord objects; under Stop those
-                    # are immediately promoted to terminating exceptions that break the
-                    # stdout pipe mid-run, causing 7-Zip to exit with a 0-byte archive.
-                    # Override the preference to SilentlyContinue for this call only so
-                    # 7-Zip can complete normally, then restore it unconditionally.
-                    $savedEAP = $ErrorActionPreference
-                    try {
-                        $ErrorActionPreference = 'SilentlyContinue'
-                        & $sevenZipExe a -mx=5 $archivePath @dirsToArchive 2>&1 | Out-Null
-                    }
-                    finally {
-                        $ErrorActionPreference = $savedEAP
-                    }
-                    # Exit 0 = success; exit 1 = warnings (non-fatal, archive still created).
-                    # Treat both as success; exit 2+ indicates a fatal archiving failure.
-                    $archiveSuccess = ($LASTEXITCODE -le 1)
+                    & $sevenZipExe a -mx=5 $archivePath @dirsToArchive | Out-Null
+                    $archiveSuccess = ($LASTEXITCODE -eq 0)
                 }
                 else {
                     Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
