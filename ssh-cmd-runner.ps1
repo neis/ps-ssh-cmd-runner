@@ -1269,15 +1269,24 @@ if ($CompressOutput) {
             $archiveSuccess = $false
             try {
                 if ($sevenZipExe) {
-                    # Pass the already-validated absolute paths from $dirsToArchive.
-                    # The GetFullPath + StartsWith($scriptRootSlash) guard above ensures
-                    # every path is contained within the script root, so no root-scanning
-                    # can occur.
-                    # stderr is redirected to $null (not merged with 2>&1) so that 7-Zip
-                    # diagnostic text never becomes ErrorRecord objects in the pipeline,
-                    # which can promote to terminating exceptions in some PS environments.
-                    & $sevenZipExe a -mx=5 $archivePath @dirsToArchive 2>$null | Out-Null
-                    $archiveSuccess = ($LASTEXITCODE -eq 0)
+                    # The script runs with $ErrorActionPreference = 'Stop'. 7-Zip writes
+                    # diagnostic text to stderr even on a fully successful run. PowerShell
+                    # wraps native-command stderr as ErrorRecord objects; under Stop those
+                    # are immediately promoted to terminating exceptions that break the
+                    # stdout pipe mid-run, causing 7-Zip to exit with a 0-byte archive.
+                    # Override the preference to SilentlyContinue for this call only so
+                    # 7-Zip can complete normally, then restore it unconditionally.
+                    $savedEAP = $ErrorActionPreference
+                    try {
+                        $ErrorActionPreference = 'SilentlyContinue'
+                        & $sevenZipExe a -mx=5 $archivePath @dirsToArchive 2>&1 | Out-Null
+                    }
+                    finally {
+                        $ErrorActionPreference = $savedEAP
+                    }
+                    # Exit 0 = success; exit 1 = warnings (non-fatal, archive still created).
+                    # Treat both as success; exit 2+ indicates a fatal archiving failure.
+                    $archiveSuccess = ($LASTEXITCODE -le 1)
                 }
                 else {
                     Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
