@@ -40,6 +40,13 @@
     interface on a chassis with many ports). Default is 30.
     Note: -TimeoutSeconds controls only the initial SSH connection handshake.
 
+.PARAMETER InitialPromptTimeoutSeconds
+    Maximum time in seconds to wait for the first device prompt after login. This window
+    covers the full SSH authentication sequence, any MOTD/banner output, and the appearance
+    of the CLI prompt. Increase this value for devices that display long banners or
+    authenticate slowly. Applies only to the initial connection wait; per-command waits
+    are governed by CommandTimeoutSeconds. Valid range: 5-300. Default is 60.
+
 .PARAMETER JsonDirectory
     Directory where JSON output files will be saved. Created automatically if it doesn't exist.
     Each run produces a timestamped session summary (ssh-session-<timestamp>.json) plus one
@@ -144,6 +151,10 @@ param(
     [ValidateRange(5, 600)]
     [int]$CommandTimeoutSeconds = 30,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait for the first device prompt after login, covering auth + banner + prompt (default 60). Separate from CommandTimeoutSeconds.")]
+    [ValidateRange(5, 300)]
+    [int]$InitialPromptTimeoutSeconds = 60,
+
     [Parameter(Mandatory = $false, HelpMessage = "Directory where the JSON output file will be saved. Created automatically if it doesn't exist.")]
     [string]$JsonDirectory = ".\json",
 
@@ -193,7 +204,7 @@ if (Test-Path $configPath -PathType Leaf) {
 
     $requiredKeys = @(
         'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
-        'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds',
+        'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds', 'InitialPromptTimeoutSeconds',
         'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled',
         'CredentialLabel', 'ClearCredentials',
         'CompressOutput', 'CompressWhen', 'DeleteAfterCompress'
@@ -210,7 +221,8 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('TimeoutSeconds'))        { $TimeoutSeconds        = [int]$config.TimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('ExtraSSHOptions'))       { $ExtraSSHOptions       = [string[]]$config.ExtraSSHOptions }
     if (-not $PSBoundParameters.ContainsKey('CommandDelayMs'))        { $CommandDelayMs        = [int]$config.CommandDelayMs }
-    if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds')) { $CommandTimeoutSeconds = [int]$config.CommandTimeoutSeconds }
+    if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds'))        { $CommandTimeoutSeconds        = [int]$config.CommandTimeoutSeconds }
+    if (-not $PSBoundParameters.ContainsKey('InitialPromptTimeoutSeconds')) { $InitialPromptTimeoutSeconds = [int]$config.InitialPromptTimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('JsonDirectory'))         { $JsonDirectory         = $config.JsonDirectory }
     if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory'))        { $NetcortexDirectory        = $config.NetcortexDirectory }
     if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
@@ -563,7 +575,8 @@ function Invoke-SSHSession {
         [int]$Timeout,
         [string[]]$SSHOptions = @(),
         [int]$CmdDelayMs = 500,
-        [int]$CmdTimeoutSec = 30
+        [int]$CmdTimeoutSec = 30,
+        [int]$InitialCmdTimeoutSec = 60
     )
 
     $result = [PSCustomObject]@{
@@ -696,11 +709,14 @@ function Invoke-SSHSession {
 
         # Wait for the initial device prompt before sending any commands.
         # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
-        $perCmdTimeoutMs = $CmdTimeoutSec * 1000
+        # $initialTimeoutMs uses InitialCmdTimeoutSec (independent of per-command timeout).
+        # $perCmdTimeoutMs is declared here and reused for all subsequent command waits.
+        $initialTimeoutMs = $InitialCmdTimeoutSec * 1000
+        $perCmdTimeoutMs  = $CmdTimeoutSec * 1000
         $lastPrompt = ""
-        if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
+        if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $initialTimeoutMs -PromptText ([ref]$lastPrompt))) {
             if (-not $proc.HasExited) { $proc.Kill() }
-            throw "Timed out waiting for initial device prompt after ${Timeout}s."
+            throw "Timed out waiting for initial device prompt after ${InitialCmdTimeoutSec}s. Consider increasing -InitialPromptTimeoutSeconds."
         }
 
         # Now that the initial prompt is captured in $lastPrompt (e.g. "s3850x-1#"),
@@ -966,8 +982,9 @@ function Invoke-SSHSession {
 # ---------------------------------------------
 $devCountStr = "$($devices.Count)".PadRight(37)
 $cmdCountStr = "$($commands.Count)".PadRight(37)
-$timeoutStr = "${TimeoutSeconds}s".PadRight(37)
+$timeoutStr    = "${TimeoutSeconds}s".PadRight(37)
 $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
+$iniTimeoutStr = "${InitialPromptTimeoutSeconds}s".PadRight(37)
 $credLabelStr = $CredentialLabel
 if ($credLabelStr.Length -gt 37) { $credLabelStr = $credLabelStr.Substring(0, 34) + "..." }
 $credLabelStr = $credLabelStr.PadRight(37)
@@ -998,6 +1015,7 @@ Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
 Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
+Write-Host "|  Ini Tmout: ${iniTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  SSH Creds: ${credLabelStr}|" -ForegroundColor Gray
 Write-Host "|  Compress : ${compressStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
@@ -1025,13 +1043,14 @@ foreach ($ip in $devices) {
     # Non-auth failures (timeout, connectivity) break out immediately.
     do {
         $sessionResult = Invoke-SSHSession `
-            -IPAddress     $ip `
-            -User          $username `
-            -CommandList   $commands `
-            -Timeout       $TimeoutSeconds `
-            -SSHOptions    $ExtraSSHOptions `
-            -CmdDelayMs    $CommandDelayMs `
-            -CmdTimeoutSec $CommandTimeoutSeconds
+            -IPAddress             $ip `
+            -User                  $username `
+            -CommandList           $commands `
+            -Timeout               $TimeoutSeconds `
+            -SSHOptions            $ExtraSSHOptions `
+            -CmdDelayMs            $CommandDelayMs `
+            -CmdTimeoutSec         $CommandTimeoutSeconds `
+            -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds
 
         if ($sessionResult.AuthFailed) {
             $authRetryCount++

@@ -89,6 +89,13 @@ Valid range: 5–600. Default: `30`
 > Note: `-TimeoutSeconds` controls the initial SSH connection handshake only.
 > `-CommandTimeoutSeconds` governs the per-command wait.
 
+**InitialPromptTimeoutSeconds** `[int]`
+Maximum time in seconds to wait for the first device prompt after login. This window covers
+the full SSH authentication sequence, any MOTD/banner output, and the appearance of the CLI
+prompt. Increase this value for devices that display long banners or authenticate slowly. This
+setting applies only to the initial connection; per-command response waits are governed by
+`CommandTimeoutSeconds`. Valid range: 5–300. Default: `60`
+
 **ExtraSSHOptions** `[string[]]`
 Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly
 used for legacy devices that require older key exchange or cipher algorithms. See

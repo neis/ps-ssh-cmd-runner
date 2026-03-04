@@ -6,6 +6,7 @@
     "ExtraSSHOptions": [],
     "CommandDelayMs": 500,
     "CommandTimeoutSeconds": 30,
+    "InitialPromptTimeoutSeconds": 60,
     "JsonDirectory": "./json",
     "NetcortexDirectory": "./netcortex",
     "LogEnabled": true,
