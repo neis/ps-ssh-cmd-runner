@@ -411,7 +411,11 @@ if ($storedUsername -and $null -ne $storedPassword -and -not $ClearCredentials) 
     Write-Host "Using stored credentials for '$username' (label: $CredentialLabel)." -ForegroundColor Cyan
 }
 else {
-    $credential       = Get-Credential -Message "Enter SSH credentials for network devices"
+    $credential = Get-Credential -Message "Enter SSH credentials for network devices"
+    if ($null -eq $credential) {
+        Write-Host "Credential prompt cancelled. Aborting." -ForegroundColor Red
+        exit 1
+    }
     $username         = $credential.UserName
     $password         = $credential.GetNetworkCredential().Password
     $credentialsSaved = $false  # freshly entered — save after first verified success
@@ -1010,8 +1014,13 @@ foreach ($ip in $devices) {
                 exit 1
             }
 
-            Write-Host "  Retry $authRetryCount of $($maxAuthRetries - 1) — please enter updated credentials." -ForegroundColor Yellow
-            $credential       = Get-Credential -Message "Credentials rejected — enter new credentials (retry $authRetryCount of $($maxAuthRetries - 1))"
+            Write-Host "  Retry $authRetryCount of $($maxAuthRetries - 1) - please enter updated credentials." -ForegroundColor Yellow
+            $credential = Get-Credential -Message "Credentials rejected - enter new credentials (retry $authRetryCount of $($maxAuthRetries - 1))"
+            if ($null -eq $credential) {
+                Write-Host "  Credential prompt cancelled. Aborting." -ForegroundColor Red
+                try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                exit 1
+            }
             $username         = $credential.UserName
             $password         = $credential.GetNetworkCredential().Password
             $credentialsSaved = $false   # new credentials must be saved after next success
