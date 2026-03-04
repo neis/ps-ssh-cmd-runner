@@ -73,6 +73,20 @@
     When $true, deletes any stored credentials matching CredentialLabel before prompting
     for new ones. Useful after a password rotation. Default is $false.
 
+.PARAMETER CompressOutput
+    When $true, creates a compressed archive of all output directories at the end of the run.
+    Uses 7-Zip (.7z) if found on the system, otherwise falls back to PowerShell's built-in
+    Compress-Archive (.zip). Default is $false.
+
+.PARAMETER CompressWhen
+    Controls when the archive is created. "Always" creates it regardless of device results.
+    "SuccessOnly" skips compression if any device failed. Default is "Always".
+
+.PARAMETER DeleteAfterCompress
+    When $true, removes the original output directories after the archive is successfully
+    created. Has no effect if CompressOutput is $false or if archive creation fails.
+    Default is $false.
+
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
 
@@ -150,7 +164,17 @@ param(
     [string]$CredentialLabel = "SSH-CMD-Runner",
 
     [Parameter(Mandatory = $false, HelpMessage = "Clear stored credentials matching CredentialLabel and prompt for new ones (default: false)")]
-    [bool]$ClearCredentials = $false
+    [bool]$ClearCredentials = $false,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Create a compressed archive of all output directories after the run (default: false)")]
+    [bool]$CompressOutput = $false,
+
+    [Parameter(Mandatory = $false, HelpMessage = "When to compress: Always or SuccessOnly (default: Always)")]
+    [ValidateSet('Always', 'SuccessOnly')]
+    [string]$CompressWhen = "Always",
+
+    [Parameter(Mandatory = $false, HelpMessage = "Delete output directories after successful archive creation (default: false)")]
+    [bool]$DeleteAfterCompress = $false
 )
 
 # ---------------------------------------------
@@ -172,7 +196,8 @@ if (Test-Path $configPath -PathType Leaf) {
         'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
         'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds',
         'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled',
-        'CredentialLabel', 'ClearCredentials'
+        'CredentialLabel', 'ClearCredentials',
+        'CompressOutput', 'CompressWhen', 'DeleteAfterCompress'
     )
     $missingKeys = $requiredKeys | Where-Object { $config.PSObject.Properties.Name -notcontains $_ }
     if ($missingKeys.Count -gt 0) {
@@ -194,6 +219,9 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled'))   { $NetcortexEnabled   = [bool]$config.NetcortexEnabled }
     if (-not $PSBoundParameters.ContainsKey('CredentialLabel'))   { $CredentialLabel    = $config.CredentialLabel }
     if (-not $PSBoundParameters.ContainsKey('ClearCredentials'))  { $ClearCredentials   = [bool]$config.ClearCredentials }
+    if (-not $PSBoundParameters.ContainsKey('CompressOutput'))       { $CompressOutput       = [bool]$config.CompressOutput }
+    if (-not $PSBoundParameters.ContainsKey('CompressWhen'))         { $CompressWhen         = $config.CompressWhen }
+    if (-not $PSBoundParameters.ContainsKey('DeleteAfterCompress'))  { $DeleteAfterCompress  = [bool]$config.DeleteAfterCompress }
 }
 
 # ---------------------------------------------
@@ -342,6 +370,25 @@ public static class CredentialManager {
     }
 }
 '@ -Language CSharp
+}
+
+# ---------------------------------------------
+# HELPER FUNCTION: Locate 7-Zip executable.
+# Checks PATH first, then common Windows install locations.
+# Returns the full path to 7z.exe / 7za.exe, or $null if not found.
+# ---------------------------------------------
+function Find-7Zip {
+    foreach ($name in @('7z.exe', '7za.exe')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+    }
+    foreach ($path in @(
+        "${env:ProgramFiles}\7-Zip\7z.exe",
+        "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+    )) {
+        if (Test-Path $path -PathType Leaf) { return $path }
+    }
+    return $null
 }
 
 # ---------------------------------------------
@@ -943,6 +990,9 @@ $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
 $credLabelStr = $CredentialLabel
 if ($credLabelStr.Length -gt 37) { $credLabelStr = $credLabelStr.Substring(0, 34) + "..." }
 $credLabelStr = $credLabelStr.PadRight(37)
+$compressStr = if ($CompressOutput) { "$CompressWhen$(if ($DeleteAfterCompress) { ' + cleanup' })" } else { "Disabled" }
+if ($compressStr.Length -gt 37) { $compressStr = $compressStr.Substring(0, 34) + "..." }
+$compressStr = $compressStr.PadRight(37)
 if ($LogEnabled) {
     $logDirStr = $LogDirectory
     if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
@@ -968,6 +1018,7 @@ Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  SSH Creds: ${credLabelStr}|" -ForegroundColor Gray
+Write-Host "|  Compress : ${compressStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
 Write-Host "|  JSON Dir : ${jsonDirStr}|" -ForegroundColor Gray
 Write-Host "|  Netcortex: ${netcortexDirStr}|" -ForegroundColor Gray
@@ -1157,6 +1208,88 @@ Write-Host "|  Failed    : " -NoNewline
 Write-Host "${failStr}" -ForegroundColor $failColor -NoNewline
 Write-Host "|"
 Write-Host "+==================================================+" -ForegroundColor Gray
+
+# ---------------------------------------------
+# POST-RUN COMPRESSION
+# Creates a timestamped archive of all output directories.
+# Uses 7-Zip (.7z) when available, falls back to Compress-Archive (.zip).
+# Source directories are only removed when archive creation is confirmed.
+# ---------------------------------------------
+if ($CompressOutput) {
+    $shouldCompress = $true
+    if ($CompressWhen -eq 'SuccessOnly' -and $failedIPs.Count -gt 0) {
+        $shouldCompress = $false
+        Write-Host ""
+        Write-Host "Compression skipped: $($failedIPs.Count) device(s) failed (CompressWhen = SuccessOnly)." -ForegroundColor Yellow
+    }
+
+    if ($shouldCompress) {
+        $sevenZipExe = Find-7Zip
+        if ($sevenZipExe) {
+            $archiveName = "ssh-session-${timestamp}.7z"
+        }
+        else {
+            $archiveName = "ssh-session-${timestamp}.zip"
+        }
+        $archivePath = Join-Path $PSScriptRoot $archiveName
+
+        # Collect all configured output directories that currently exist on disk.
+        # Includes directories from disabled output types if they exist from prior runs.
+        $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) |
+            Where-Object { Test-Path $_ -PathType Container }
+
+        Write-Host ""
+        if ($dirsToArchive.Count -eq 0) {
+            Write-Host "Compression skipped: no output directories found on disk." -ForegroundColor Yellow
+        }
+        else {
+            $engineLabel = if ($sevenZipExe) { "7-Zip" } else { "PowerShell Compress-Archive" }
+            Write-Host "Compressing output via $engineLabel ..." -ForegroundColor Cyan
+
+            $archiveSuccess = $false
+            try {
+                if ($sevenZipExe) {
+                    & $sevenZipExe a -mx=5 $archivePath @dirsToArchive | Out-Null
+                    $archiveSuccess = ($LASTEXITCODE -eq 0)
+                }
+                else {
+                    Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
+                    $archiveSuccess = (Test-Path $archivePath)
+                }
+            }
+            catch {
+                Write-Host "  ERROR: Compression failed - $($_.Exception.Message)" -ForegroundColor Red
+            }
+
+            if ($archiveSuccess) {
+                $archiveItem    = Get-Item $archivePath
+                $archiveSizeStr = if ($archiveItem.Length -ge 1MB) {
+                    "{0:0.0} MB" -f ($archiveItem.Length / 1MB)
+                }
+                else {
+                    "{0:0.0} KB" -f ($archiveItem.Length / 1KB)
+                }
+                Write-Host "  Archive: $archiveName ($archiveSizeStr)" -ForegroundColor Green
+
+                if ($DeleteAfterCompress) {
+                    foreach ($dir in $dirsToArchive) {
+                        try {
+                            Remove-Item -Path $dir -Recurse -Force -ErrorAction Stop
+                            Write-Verbose "Removed output directory: $dir"
+                        }
+                        catch {
+                            Write-Warning "Could not remove '$dir': $($_.Exception.Message)"
+                        }
+                    }
+                    Write-Host "  Output directories removed." -ForegroundColor Gray
+                }
+            }
+            else {
+                Write-Host "  WARNING: Archive creation failed. Output directories were not removed." -ForegroundColor Red
+            }
+        }
+    }
+}
 
 # ---------------------------------------------
 # CLEANUP - Remove askpass helper securely
