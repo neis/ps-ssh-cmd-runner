@@ -20,9 +20,131 @@ Output is read character-by-character from stdout via a background runspace. Thi
 handles devices (such as Cisco IOS) that send the CLI prompt without a trailing newline, which
 would cause a line-based reader to block indefinitely.
 
-## LOG FORMAT
+Credentials are stored securely in **Windows Credential Manager** after first entry, so
+subsequent runs do not re-prompt as long as the stored credentials remain valid.
 
-Each log file contains three sections:
+## REQUIREMENTS
+
+- Windows PowerShell 5.1 or later
+- OpenSSH client (`ssh.exe`) available in PATH
+  (Windows Optional Feature: *OpenSSH Client*, or Git for Windows)
+
+## CONFIGURATION FILE
+
+All parameters can be set via a `config.json` file placed alongside the script. CLI arguments
+always take precedence over config file values, which take precedence over built-in defaults.
+Copy `[example] config.json` to `config.json` and edit as needed.
+
+```json
+{
+    "DeviceListFile": "./devices.txt",
+    "CommandsFile": "./commands.txt",
+    "LogDirectory": "./logs",
+    "TimeoutSeconds": 10,
+    "ExtraSSHOptions": [],
+    "CommandDelayMs": 500,
+    "CommandTimeoutSeconds": 30,
+    "JsonDirectory": "./json",
+    "NetcortexDirectory": "./netcortex",
+    "LogEnabled": true,
+    "JsonEnabled": false,
+    "NetcortexEnabled": false,
+    "CredentialLabel": "SSH-CMD-Runner",
+    "ClearCredentials": false,
+    "CompressOutput": false,
+    "CompressWhen": "Always",
+    "DeleteAfterCompress": false
+}
+```
+
+## PARAMETERS
+
+**DeviceListFile** `[string]`
+Path to a text file containing one IP address per line. Blank lines and lines beginning
+with `#` are ignored. Default: `.\devices.txt`
+
+**CommandsFile** `[string]`
+Path to a text file containing one command per line to execute on each device. Blank lines
+and lines beginning with `#` are ignored. Default: `.\commands.txt`
+
+**LogDirectory** `[string]`
+Directory where per-device `.log` files will be saved. Created automatically if it does not
+exist. Default: `.\logs`
+
+**TimeoutSeconds** `[int]`
+SSH connection timeout in seconds applied to the initial handshake. Valid range: 5–120.
+Default: `10`
+
+**CommandDelayMs** `[int]`
+Delay in milliseconds to wait after receiving the device prompt before sending the next
+command. Useful for slower devices or commands that produce large output where the prompt
+may appear before the output buffer is fully flushed. Valid range: 100–10000. Default: `500`
+
+**CommandTimeoutSeconds** `[int]`
+Maximum time in seconds to wait for the device to return its prompt after each command is
+sent. Covers device processing time plus transmission of all output lines. Increase this
+value for commands with large output (e.g. `show interface` on a chassis with many ports).
+Valid range: 5–600. Default: `30`
+
+> Note: `-TimeoutSeconds` controls the initial SSH connection handshake only.
+> `-CommandTimeoutSeconds` governs the per-command wait.
+
+**ExtraSSHOptions** `[string[]]`
+Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly
+used for legacy devices that require older key exchange or cipher algorithms. See
+[Legacy Device Support](#legacy-device-support) for details. Default: `[]`
+
+**JsonDirectory** `[string]`
+Directory where JSON output files will be saved. Created automatically if it does not exist.
+Each run produces a timestamped session summary plus one per-device file for each successful
+connection. Default: `.\json`
+
+**NetcortexDirectory** `[string]`
+Directory where per-device raw output text files will be saved. Created automatically if it
+does not exist. Each successful device session produces a `.txt` file using the naming
+convention `DeviceName_IPAddress_Timestamp.txt`. Default: `.\netcortex`
+
+**LogEnabled** `[bool]`
+Enable or disable `.log` file output. When `$false`, no log files are written.
+Default: `$true`
+
+**JsonEnabled** `[bool]`
+Enable or disable JSON file output. When `$false`, no session or per-device `.json` files
+are written. Default: `$false`
+
+**NetcortexEnabled** `[bool]`
+Enable or disable Netcortex raw output text files. When `$false`, no `.txt` files are
+written to `NetcortexDirectory`. Default: `$false`
+
+**CredentialLabel** `[string]`
+The target name used to store and retrieve credentials in Windows Credential Manager.
+Allows different credential sets to be maintained for different environments.
+Default: `"SSH-CMD-Runner"`
+
+**ClearCredentials** `[bool]`
+When `$true`, deletes any stored credentials matching `CredentialLabel` before prompting
+for new ones. Use this after a password rotation to force re-entry. Default: `$false`
+
+**CompressOutput** `[bool]`
+When `$true`, creates a timestamped `.zip` archive of all output directories at the end of
+the run using PowerShell's built-in `Compress-Archive`. Only directories that contain at
+least one file are included. Default: `$false`
+
+**CompressWhen** `[string]`
+Controls when the archive is created. `"Always"` archives regardless of device results.
+`"SuccessOnly"` skips compression if any device failed. Default: `"Always"`
+
+**DeleteAfterCompress** `[bool]`
+When `$true`, removes the original output directories after the archive is successfully
+created. Has no effect if `CompressOutput` is `$false` or if archive creation fails.
+Default: `$false`
+
+## OUTPUT FILES
+
+### Log Files
+
+Each device session produces a `.log` file in `LogDirectory` using the naming convention
+`DeviceName_IPAddress_Timestamp.log`. Each log file contains three sections:
 
 1. **Header** — device name, IP, user, date, status, and timeout setting.
 2. **Commands Sent** — the full list of commands that were submitted to the device.
@@ -43,14 +165,11 @@ The prompt is written alone (without a command) twice between each command block
 every non-blank line is either a prompt, a command echo, or device output, the log is
 straightforward to parse programmatically.
 
-## JSON OUTPUT
+### JSON Output
 
-In addition to the per-device `.log` files, the script writes a timestamped JSON file
-to the JSON directory (default: `.\json\`) after all devices have been processed.
-The filename follows the convention `ssh-output-<timestamp>.json` (e.g. `ssh-output-20260226_150659.json`),
-matching the `.log` file naming convention so successive runs never overwrite each other.
-
-### Structure
+When `JsonEnabled` is `$true`, the script writes a timestamped JSON file to `JsonDirectory`
+after all devices have been processed. The filename follows the convention
+`ssh-output-<timestamp>.json`.
 
 ```json
 {
@@ -89,82 +208,141 @@ matching the `.log` file naming convention so successive runs never overwrite ea
 }
 ```
 
-### Key details
+Key details:
 
-- Only **successfully connected** devices appear in the `devices` array. Devices that
-  failed to connect are listed in `summary.devices.failed_ip_addresses`.
-- Each command's output is stored as **an array of strings** (`raw_output`), one element
-  per output line. Blank lines are preserved as empty strings `""`.
-- **Double-quotes** within device output (e.g. `NAME: "Switch 1"`) are automatically
-  escaped as `\"` by `ConvertTo-Json` — no manual handling is required.
-- The `summary.date` reflects the run start time; per-device `timestamp` reflects the
-  completion time of that device's session.
-- `summary.platform` is populated dynamically from the host OS (e.g. `"Microsoft Windows 10.0.22631"`).
-- `summary.engine` reflects the PowerShell version that ran the script (e.g. `"PowerShell 7.5.4"`).
+- Only **successfully connected** devices appear in the `devices` array. Failed devices are
+  listed in `summary.devices.failed_ip_addresses`.
+- Each command's output is stored as **an array of strings** (`raw_output`), one element per
+  output line. Blank lines are preserved as empty strings `""`.
+- **Double-quotes** within device output are automatically escaped as `\"` by
+  `ConvertTo-Json`.
+- `summary.date` reflects the run start time; per-device `timestamp` reflects the completion
+  time of that device's session.
+- `summary.platform` and `summary.engine` are populated dynamically from the host OS and
+  PowerShell version.
 
-## REQUIREMENTS
+### Netcortex Output
 
-- Windows PowerShell 5.1 or later
-- OpenSSH client (`ssh.exe`) available in PATH
-  (Windows Optional Feature: *OpenSSH Client*, or Git for Windows)
+When `NetcortexEnabled` is `$true`, the script writes a plain-text file for each
+successfully connected device to `NetcortexDirectory`. The filename uses the same
+`DeviceName_IPAddress_Timestamp.txt` convention as the log files. These files contain the
+raw device output with no header or formatting, suited for import into Netcortex or other
+NMS platforms.
 
-## PARAMETERS
+## SESSION COMPRESSION
 
-**DeviceListFile** `[string]`
-Path to a text file containing one IP address per line. Blank lines and lines beginning
-with `#` are ignored. Default: `.\devices.txt`
+When `CompressOutput` is `$true`, the script packages all output directories into a single
+timestamped archive at the end of the run:
 
-**CommandsFile** `[string]`
-Path to a text file containing one command per line to execute on each device. Blank lines
-and lines beginning with `#` are ignored. Default: `.\commands.txt`
+```
+ssh-session-20260303_143000.zip
+```
 
-**LogDirectory** `[string]`
-Directory where output logs will be saved. Created automatically if it does not exist.
-Default: `.\logs`
+The archive is created in the same directory as the script. Only directories that exist **and
+contain at least one file** are included — empty directories are silently skipped.
 
-**TimeoutSeconds** `[int]`
-Per-command SSH timeout in seconds. Applied when waiting for the initial device prompt and
-after each individual command. Valid range: 5–120. Default: `10`
+| Parameter | Effect |
+|---|---|
+| `CompressOutput = $true` | Enable archiving |
+| `CompressWhen = "Always"` | Archive regardless of device success/failure |
+| `CompressWhen = "SuccessOnly"` | Skip archive if any device failed |
+| `DeleteAfterCompress = $true` | Remove source directories after a confirmed successful archive |
 
-**CommandDelayMs** `[int]`
-Delay in milliseconds to wait after receiving the device prompt before sending the next
-command. Useful for slower devices or commands that produce large output where the prompt
-may appear before the output buffer is fully flushed. Valid range: 100–10000. Default: `500`
+Example — compress and clean up after every run:
 
-**JsonDirectory** `[string]`
-Directory where the JSON output file will be written. Created automatically if it does not exist.
-The filename uses the format `ssh-output-<timestamp>.json` so successive runs never overwrite
-each other. Default: `.\json`
+```powershell
+.\ssh-cmd-runner.ps1 -CompressOutput $true -DeleteAfterCompress $true
+```
 
-**ExtraSSHOptions** `[string[]]`
-Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly
-used for legacy devices that require older key exchange or cipher algorithms.
+Example — only compress when all devices succeeded:
 
-## EXAMPLES
+```powershell
+.\ssh-cmd-runner.ps1 -CompressOutput $true -CompressWhen SuccessOnly
+```
 
-Run with all defaults:
+## WINDOWS CREDENTIAL MANAGER
 
-    .\ssh-cmd-runner.ps1
+On first run the script prompts for a username and password, then stores them securely in
+Windows Credential Manager under the label defined by `CredentialLabel` (default:
+`"SSH-CMD-Runner"`). Subsequent runs retrieve the stored credentials automatically without
+re-prompting.
 
-Specify device list and commands file explicitly:
+**Rotate credentials** after a password change:
 
-    .\ssh-cmd-runner.ps1 -DeviceListFile .\devices.txt -CommandsFile .\commands.txt
+```powershell
+.\ssh-cmd-runner.ps1 -ClearCredentials $true
+```
 
-Write logs to a custom directory with a longer timeout:
+**Use separate credentials** for different environments by specifying a unique label:
 
-    .\ssh-cmd-runner.ps1 -LogDirectory "C:\Logs\Network" -TimeoutSeconds 30
+```powershell
+.\ssh-cmd-runner.ps1 -CredentialLabel "SSH-PROD"
+.\ssh-cmd-runner.ps1 -CredentialLabel "SSH-LAB"
+```
 
-Add a 1-second delay between commands for slower devices or large output:
+## LEGACY DEVICE SUPPORT
 
-    .\ssh-cmd-runner.ps1 -CommandDelayMs 1000
+Older network devices often require SSH algorithms that modern OpenSSH clients disable by
+default. There are two ways to supply these settings.
 
-Write JSON output to a custom directory:
+### Option 1 — ExtraSSHOptions parameter
 
-    .\ssh-cmd-runner.ps1 -JsonDirectory "C:\Data\NetworkJSON"
+Pass the required options directly on the command line or via `config.json`. Each `-o` flag
+and its value must be a separate array element:
 
-Connect to legacy devices requiring older SSH algorithms:
+```powershell
+.\ssh-cmd-runner.ps1 -ExtraSSHOptions '-o','MACs=hmac-sha1,hmac-sha1-96',`
+                                       '-o','KexAlgorithms=+diffie-hellman-group1-sha1',`
+                                       '-o','HostKeyAlgorithms=+ssh-rsa'
+```
 
-    .\ssh-cmd-runner.ps1 -ExtraSSHOptions '-o','KexAlgorithms=+diffie-hellman-group1-sha1','-o','HostKeyAlgorithms=+ssh-rsa'
+Or in `config.json`:
+
+```json
+"ExtraSSHOptions": [
+    "-o", "MACs=hmac-sha1,hmac-sha1-96",
+    "-o", "KexAlgorithms=+diffie-hellman-group1-sha1",
+    "-o", "HostKeyAlgorithms=+ssh-rsa"
+]
+```
+
+### Option 2 — SSH config file (recommended for permanent environments)
+
+A per-host SSH config file at `~\.ssh\config` (i.e. `C:\Users\<you>\.ssh\config`) is read
+automatically by `ssh.exe` for every connection. Placing legacy settings here removes the
+need to pass `ExtraSSHOptions` at all and keeps the settings in one place regardless of
+which tool initiates the SSH session.
+
+Create or append to `~\.ssh\config`:
+
+```
+Host 10.*
+  User nimda
+  Port 22
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  MACs hmac-sha1,hmac-sha1-96
+  KexAlgorithms diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
+  HostKeyAlgorithms +ssh-rsa
+```
+
+The `Host 10.*` wildcard matches any IP address beginning with `10.` Use a more specific
+pattern (e.g. `Host 10.1.50.*`) to scope the settings to a particular subnet, or list
+individual IPs with separate `Host` blocks.
+
+| Directive | Purpose |
+|---|---|
+| `User` | Default SSH username for matched hosts |
+| `Port` | Default SSH port |
+| `StrictHostKeyChecking no` | Do not abort when the host key is unknown or changed |
+| `UserKnownHostsFile /dev/null` | Discard host key checks entirely (lab/legacy use) |
+| `MACs` | Permitted message authentication code algorithms |
+| `KexAlgorithms` | Permitted key exchange algorithms |
+| `HostKeyAlgorithms +ssh-rsa` | Re-enable RSA host keys (disabled by default in OpenSSH 8.8+) |
+
+> **Note:** When `Host` directives in `~\.ssh\config` already cover the target devices,
+> `ExtraSSHOptions` can be left empty (`[]`) and the `User` directive can be ignored in
+> favour of the credential prompt.
 
 ## SUPPORTED DEVICE PROMPT FORMATS
 
@@ -180,3 +358,45 @@ parsing the device hostname from output:
 | Palo Alto PAN-OS    | `user@hostname>` `user@hostname#` |
 | HP / Aruba          | `hostname#` `hostname>`     |
 | Linux-based NOS     | `user@hostname:~$` `[user@hostname ~]$` |
+
+## EXAMPLES
+
+Run with all defaults:
+
+    .\ssh-cmd-runner.ps1
+
+Specify device list and commands file explicitly:
+
+    .\ssh-cmd-runner.ps1 -DeviceListFile .\devices.txt -CommandsFile .\commands.txt
+
+Write logs to a custom directory with a longer connection timeout:
+
+    .\ssh-cmd-runner.ps1 -LogDirectory "C:\Logs\Network" -TimeoutSeconds 30
+
+Increase the per-command timeout for devices with verbose output:
+
+    .\ssh-cmd-runner.ps1 -CommandTimeoutSeconds 60
+
+Add a 1-second delay between commands for slower devices:
+
+    .\ssh-cmd-runner.ps1 -CommandDelayMs 1000
+
+Enable JSON and Netcortex output in addition to log files:
+
+    .\ssh-cmd-runner.ps1 -JsonEnabled $true -NetcortexEnabled $true
+
+Force fresh credential entry after a password rotation:
+
+    .\ssh-cmd-runner.ps1 -ClearCredentials $true
+
+Compress all output directories into a zip archive after the run:
+
+    .\ssh-cmd-runner.ps1 -CompressOutput $true
+
+Compress and remove source directories, but only if all devices succeeded:
+
+    .\ssh-cmd-runner.ps1 -CompressOutput $true -CompressWhen SuccessOnly -DeleteAfterCompress $true
+
+Connect to legacy devices using ExtraSSHOptions:
+
+    .\ssh-cmd-runner.ps1 -ExtraSSHOptions '-o','KexAlgorithms=+diffie-hellman-group1-sha1','-o','HostKeyAlgorithms=+ssh-rsa'
