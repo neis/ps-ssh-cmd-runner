@@ -1269,20 +1269,15 @@ if ($CompressOutput) {
             $archiveSuccess = $false
             try {
                 if ($sevenZipExe) {
-                    # Strip the script-root prefix to get bare names (e.g. "logs", "json").
-                    # Push-Location pins 7-Zip's working directory to $scriptRoot so it can
-                    # only ever see directories that are direct children of the script root.
-                    # Passing relative names (not absolute paths) eliminates any possibility
-                    # of 7-Zip walking up to or enumerating the root filesystem.
-                    $relDirs = $dirsToArchive | ForEach-Object { $_.Substring($scriptRootSlash.Length) }
-                    Push-Location $scriptRoot
-                    try {
-                        & $sevenZipExe a -mx=5 $archivePath @relDirs 2>&1 | Out-Null
-                        $archiveSuccess = ($LASTEXITCODE -eq 0)
-                    }
-                    finally {
-                        Pop-Location
-                    }
+                    # Pass the already-validated absolute paths from $dirsToArchive.
+                    # The GetFullPath + StartsWith($scriptRootSlash) guard above ensures
+                    # every path is contained within the script root, so no root-scanning
+                    # can occur.
+                    # stderr is redirected to $null (not merged with 2>&1) so that 7-Zip
+                    # diagnostic text never becomes ErrorRecord objects in the pipeline,
+                    # which can promote to terminating exceptions in some PS environments.
+                    & $sevenZipExe a -mx=5 $archivePath @dirsToArchive 2>$null | Out-Null
+                    $archiveSuccess = ($LASTEXITCODE -eq 0)
                 }
                 else {
                     Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
