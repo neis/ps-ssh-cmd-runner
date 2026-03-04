@@ -1233,13 +1233,10 @@ if ($CompressOutput) {
         }
         $archivePath = Join-Path $PSScriptRoot $archiveName
 
-        # Collect all configured output directories that exist on disk and contain
-        # at least one file. Empty directories are excluded from the archive.
-        # Select-Object -First 1 stops as soon as any file is found (efficient).
+        # Collect all configured output directories that currently exist on disk.
+        # Includes directories from disabled output types if they exist from prior runs.
         $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) |
-            Where-Object { (Test-Path $_ -PathType Container) -and
-                           (Get-ChildItem -Path $_ -Recurse -File -ErrorAction SilentlyContinue |
-                            Select-Object -First 1) }
+            Where-Object { Test-Path $_ -PathType Container }
 
         Write-Host ""
         if ($dirsToArchive.Count -eq 0) {
