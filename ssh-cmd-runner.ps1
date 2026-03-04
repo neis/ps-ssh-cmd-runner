@@ -1234,22 +1234,12 @@ if ($CompressOutput) {
         $archivePath = Join-Path $PSScriptRoot $archiveName
 
         # Collect all configured output directories that exist on disk and contain
-        # at least one file. Purely empty directories add nothing to the archive.
-        # Uses the .NET Directory.EnumerateFiles lazy enumerator: the iterator is
-        # advanced exactly once (MoveNext), so the scan stops the moment the first
-        # file is located. No recursive PowerShell pipeline is started; the path is
-        # treated as a literal string, not a wildcard pattern.
+        # at least one file. Empty directories are excluded from the archive.
+        # Select-Object -First 1 stops as soon as any file is found (efficient).
         $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) |
-            Where-Object {
-                if (-not (Test-Path $_ -PathType Container)) { return $false }
-                try {
-                    $e = [System.IO.Directory]::EnumerateFiles(
-                        $_, '*', [System.IO.SearchOption]::AllDirectories
-                    ).GetEnumerator()
-                    $e.MoveNext()   # $true when ≥1 file exists; $false when empty
-                }
-                catch { $false }   # inaccessible path → treat as empty / skip
-            }
+            Where-Object { (Test-Path $_ -PathType Container) -and
+                           (Get-ChildItem -Path $_ -Recurse -File -ErrorAction SilentlyContinue |
+                            Select-Object -First 1) }
 
         Write-Host ""
         if ($dirsToArchive.Count -eq 0) {
