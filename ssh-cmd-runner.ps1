@@ -351,7 +351,22 @@ public static class CredentialManager {
 # ---------------------------------------------
 function Test-IsAuthFailure {
     param([string]$StdErr)
-    return ($StdErr -match 'Permission denied|Authentication failed')
+
+    # Standard OpenSSH rejection messages
+    if ($StdErr -match 'Permission denied|Authentication failed|Too many authentication failures') { return $true }
+
+    # Vendor-agnostic detection for devices (e.g. Cisco IOS) that never emit
+    # "Permission denied" but do call SSH_ASKPASS for each password attempt.
+    # Two or more read_passphrase calls means the first password was rejected
+    # and SSH requested a second attempt — definitive credential failure.
+    $askpassCount = ([regex]::Matches($StdErr, 'read_passphrase')).Count
+    if ($askpassCount -ge 2) { return $true }
+
+    # Single askpass call followed by the server closing the connection means
+    # the device accepted only one attempt before disconnecting (auth rejected).
+    if ($askpassCount -ge 1 -and ($StdErr -match 'Connection closed by')) { return $true }
+
+    return $false
 }
 
 # ---------------------------------------------
