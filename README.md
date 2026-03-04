@@ -27,7 +27,7 @@ subsequent runs do not re-prompt as long as the stored credentials remain valid.
 
 - Windows PowerShell 5.1 or later
 - OpenSSH client (`ssh.exe`) available in PATH
-  (Windows Optional Feature: *OpenSSH Client*, or Git for Windows)
+  (Windows Optional Feature: _OpenSSH Client_, or Git for Windows)
 
 ## CONFIGURATION FILE
 
@@ -37,23 +37,23 @@ Copy `[example] config.json` to `config.json` and edit as needed.
 
 ```json
 {
-    "DeviceListFile": "./devices.txt",
-    "CommandsFile": "./commands.txt",
-    "LogDirectory": "./logs",
-    "TimeoutSeconds": 10,
-    "ExtraSSHOptions": [],
-    "CommandDelayMs": 500,
-    "CommandTimeoutSeconds": 30,
-    "JsonDirectory": "./json",
-    "NetcortexDirectory": "./netcortex",
-    "LogEnabled": true,
-    "JsonEnabled": false,
-    "NetcortexEnabled": false,
-    "CredentialLabel": "SSH-CMD-Runner",
-    "ClearCredentials": false,
-    "CompressOutput": false,
-    "CompressWhen": "Always",
-    "DeleteAfterCompress": false
+  "DeviceListFile": "./devices.txt",
+  "CommandsFile": "./commands.txt",
+  "LogDirectory": "./logs",
+  "TimeoutSeconds": 10,
+  "ExtraSSHOptions": [],
+  "CommandDelayMs": 500,
+  "CommandTimeoutSeconds": 30,
+  "JsonDirectory": "./json",
+  "NetcortexDirectory": "./netcortex",
+  "LogEnabled": true,
+  "JsonEnabled": false,
+  "NetcortexEnabled": false,
+  "CredentialLabel": "SSH-CMD-Runner",
+  "ClearCredentials": false,
+  "CompressOutput": false,
+  "CompressWhen": "Always",
+  "DeleteAfterCompress": false
 }
 ```
 
@@ -241,12 +241,12 @@ ssh-session-20260303_143000.zip
 The archive is created in the same directory as the script. Only directories that exist **and
 contain at least one file** are included — empty directories are silently skipped.
 
-| Parameter | Effect |
-|---|---|
-| `CompressOutput = $true` | Enable archiving |
-| `CompressWhen = "Always"` | Archive regardless of device success/failure |
-| `CompressWhen = "SuccessOnly"` | Skip archive if any device failed |
-| `DeleteAfterCompress = $true` | Remove source directories after a confirmed successful archive |
+| Parameter                      | Effect                                                         |
+| ------------------------------ | -------------------------------------------------------------- |
+| `CompressOutput = $true`       | Enable archiving                                               |
+| `CompressWhen = "Always"`      | Archive regardless of device success/failure                   |
+| `CompressWhen = "SuccessOnly"` | Skip archive if any device failed                              |
+| `DeleteAfterCompress = $true`  | Remove source directories after a confirmed successful archive |
 
 Example — compress and clean up after every run:
 
@@ -321,8 +321,8 @@ Host 10.*
   Port 22
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
-  MACs hmac-sha1,hmac-sha1-96
-  KexAlgorithms diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
+  MACs +hmac-sha1,hmac-sha1-96
+  KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
   HostKeyAlgorithms +ssh-rsa
 ```
 
@@ -330,15 +330,15 @@ The `Host 10.*` wildcard matches any IP address beginning with `10.` Use a more 
 pattern (e.g. `Host 10.1.50.*`) to scope the settings to a particular subnet, or list
 individual IPs with separate `Host` blocks.
 
-| Directive | Purpose |
-|---|---|
-| `User` | Default SSH username for matched hosts |
-| `Port` | Default SSH port |
-| `StrictHostKeyChecking no` | Do not abort when the host key is unknown or changed |
-| `UserKnownHostsFile /dev/null` | Discard host key checks entirely (lab/legacy use) |
-| `MACs` | Permitted message authentication code algorithms |
-| `KexAlgorithms` | Permitted key exchange algorithms |
-| `HostKeyAlgorithms +ssh-rsa` | Re-enable RSA host keys (disabled by default in OpenSSH 8.8+) |
+| Directive                      | Purpose                                                       |
+| ------------------------------ | ------------------------------------------------------------- |
+| `User`                         | Default SSH username for matched hosts                        |
+| `Port`                         | Default SSH port                                              |
+| `StrictHostKeyChecking no`     | Do not abort when the host key is unknown or changed          |
+| `UserKnownHostsFile /dev/null` | Discard host key checks entirely (lab/legacy use)             |
+| `MACs`                         | Permitted message authentication code algorithms              |
+| `KexAlgorithms`                | Permitted key exchange algorithms                             |
+| `HostKeyAlgorithms +ssh-rsa`   | Re-enable RSA host keys (disabled by default in OpenSSH 8.8+) |
 
 > **Note:** When `Host` directives in `~\.ssh\config` already cover the target devices,
 > `ExtraSSHOptions` can be left empty (`[]`) and the `User` directive can be ignored in
@@ -349,15 +349,15 @@ individual IPs with separate `Host` blocks.
 The script recognises the following prompt styles when detecting the CLI prompt and
 parsing the device hostname from output:
 
-| Vendor / OS         | Example prompt              |
-|---------------------|-----------------------------|
-| Cisco IOS / IOS-XE  | `hostname#` `hostname>`     |
-| Cisco NX-OS         | `hostname#` `hostname(config)#` |
-| Arista EOS          | `hostname#` `hostname>`     |
-| Juniper JunOS       | `user@hostname>` `user@hostname#` |
-| Palo Alto PAN-OS    | `user@hostname>` `user@hostname#` |
-| HP / Aruba          | `hostname#` `hostname>`     |
-| Linux-based NOS     | `user@hostname:~$` `[user@hostname ~]$` |
+| Vendor / OS        | Example prompt                          |
+| ------------------ | --------------------------------------- |
+| Cisco IOS / IOS-XE | `hostname#` `hostname>`                 |
+| Cisco NX-OS        | `hostname#` `hostname(config)#`         |
+| Arista EOS         | `hostname#` `hostname>`                 |
+| Juniper JunOS      | `user@hostname>` `user@hostname#`       |
+| Palo Alto PAN-OS   | `user@hostname>` `user@hostname#`       |
+| HP / Aruba         | `hostname#` `hostname>`                 |
+| Linux-based NOS    | `user@hostname:~$` `[user@hostname ~]$` |
 
 ## EXAMPLES
 
