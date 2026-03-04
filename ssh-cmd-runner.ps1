@@ -652,7 +652,7 @@ function Invoke-SSHSession {
         $perCmdTimeoutMs = $CmdTimeoutSec * 1000
         $lastPrompt = ""
         if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
-            $proc.Kill()
+            if (-not $proc.HasExited) { $proc.Kill() }
             throw "Timed out waiting for initial device prompt after ${Timeout}s."
         }
 
@@ -831,12 +831,28 @@ function Invoke-SSHSession {
         }
     }
     catch {
-        $result.Status = "Failed"
-        $result.Error = $_.Exception.Message
+        $result.Status     = "Failed"
         $result.DeviceName = "unknown"
 
+        # Read whatever stderr was collected before the exception was thrown.
+        # SSH auth rejection ("Permission denied") appears here even when the
+        # exception path is taken instead of the normal exit-code path.
+        $catchStdErr = if ($null -ne $stdErrBuilder) { $stdErrBuilder.ToString().Trim() } else { "" }
+
+        # Auth failure takes priority over the exception message for both
+        # $result.Error and $result.AuthFailed.
+        $result.AuthFailed = Test-IsAuthFailure -StdErr $catchStdErr
+        if ($result.AuthFailed) {
+            # Use the last non-empty stderr line as the user-facing error.
+            $authErrLines = $catchStdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            $result.Error = if ($authErrLines) { $authErrLines[-1] } else { "Authentication failed" }
+        }
+        else {
+            $result.Error = $_.Exception.Message
+        }
+
         # Still write a failure log
-        $safeIP = ConvertTo-SafeFileName $IPAddress
+        $safeIP      = ConvertTo-SafeFileName $IPAddress
         $logFileName = "unknown_${safeIP}_${timestamp}.log"
         $logFilePath = Join-Path $LogDirectory $logFileName
         $result.LogFile = $logFilePath
@@ -851,13 +867,21 @@ function Invoke-SSHSession {
             " Cmd Tmout : ${CmdTimeoutSec}s"
             $separator
             ""
-            "ERROR: $($_.Exception.Message)"
+            "ERROR: $($result.Error)"
         )
 
         if ($null -ne $stdOutBuilder -and $stdOutBuilder.Length -gt 0) {
             $failLines += ""
             $failLines += "$thinSep PARTIAL OUTPUT (before failure) $thinSep"
             $failLines += $stdOutBuilder.ToString()
+        }
+
+        # Always append SSH diagnostics when available — critical for troubleshooting
+        # any failure, including auth failures, host-key errors, and connectivity issues.
+        if (-not [string]::IsNullOrWhiteSpace($catchStdErr)) {
+            $failLines += ""
+            $failLines += "$thinSep SSH ERRORS / DIAGNOSTICS $thinSep"
+            $failLines += $catchStdErr
         }
 
         if ($LogEnabled) {
