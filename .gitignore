@@ -12,3 +12,7 @@ devices.txt
 
 # Exclude claude directory
 .claude/
+
+# Ignore compressed files
+*.7zip
+*.zip
