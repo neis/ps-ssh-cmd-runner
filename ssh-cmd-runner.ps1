@@ -1233,15 +1233,26 @@ if ($CompressOutput) {
         }
         $archivePath = Join-Path $PSScriptRoot $archiveName
 
-        # Resolve each output directory to an absolute path anchored to $PSScriptRoot so
-        # that relative paths (e.g. "./logs") are unambiguous when passed to 7-Zip, which
-        # resolves paths against its own working directory rather than PowerShell's.
-        # Directories outside the script root are excluded as a safety guard.
-        # Empty directories (no files) are also excluded.
+        # Normalize the script root once; guard against empty $PSScriptRoot (e.g. dot-sourced).
+        # A trailing separator is appended so that StartsWith cannot produce false positives:
+        #   "C:\foo Extra\bar".StartsWith("C:\foo")  → true  (WRONG, no separator)
+        #   "C:\foo Extra\bar".StartsWith("C:\foo\") → false (correct)
+        $scriptRoot      = if ($PSScriptRoot) { [System.IO.Path]::GetFullPath($PSScriptRoot) } else { $PWD.Path }
+        $scriptRootSlash = $scriptRoot.TrimEnd('\') + '\'
+
+        # Resolve each configured output directory to a fully-normalised absolute path.
+        # Relative paths (e.g. "./logs") are anchored to the script root via GetFullPath,
+        # which removes any "." or ".." segments.
+        # Absolute paths outside the script root are rejected by the StartsWith guard.
+        # Empty directories (no files) are excluded from the archive.
         $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) | ForEach-Object {
-            if ([System.IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $PSScriptRoot $_ }
+            if ([System.IO.Path]::IsPathRooted($_)) {
+                [System.IO.Path]::GetFullPath($_)
+            } else {
+                [System.IO.Path]::GetFullPath((Join-Path $scriptRoot $_))
+            }
         } | Where-Object {
-            $_.StartsWith($PSScriptRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
+            $_.StartsWith($scriptRootSlash, [System.StringComparison]::OrdinalIgnoreCase) -and
             (Test-Path $_ -PathType Container) -and
             (Get-ChildItem -Path $_ -Recurse -File -ErrorAction SilentlyContinue |
              Select-Object -First 1)
@@ -1258,8 +1269,20 @@ if ($CompressOutput) {
             $archiveSuccess = $false
             try {
                 if ($sevenZipExe) {
-                    & $sevenZipExe a -mx=5 $archivePath @dirsToArchive | Out-Null
-                    $archiveSuccess = ($LASTEXITCODE -eq 0)
+                    # Strip the script-root prefix to get bare names (e.g. "logs", "json").
+                    # Push-Location pins 7-Zip's working directory to $scriptRoot so it can
+                    # only ever see directories that are direct children of the script root.
+                    # Passing relative names (not absolute paths) eliminates any possibility
+                    # of 7-Zip walking up to or enumerating the root filesystem.
+                    $relDirs = $dirsToArchive | ForEach-Object { $_.Substring($scriptRootSlash.Length) }
+                    Push-Location $scriptRoot
+                    try {
+                        & $sevenZipExe a -mx=5 $archivePath @relDirs 2>&1 | Out-Null
+                        $archiveSuccess = ($LASTEXITCODE -eq 0)
+                    }
+                    finally {
+                        Pop-Location
+                    }
                 }
                 else {
                     Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
