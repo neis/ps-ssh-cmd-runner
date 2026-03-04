@@ -1233,13 +1233,19 @@ if ($CompressOutput) {
         }
         $archivePath = Join-Path $PSScriptRoot $archiveName
 
-        # Collect all configured output directories that exist on disk and contain
-        # at least one file. Empty directories are excluded from the archive.
-        # Select-Object -First 1 stops as soon as any file is found (efficient).
-        $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) |
-            Where-Object { (Test-Path $_ -PathType Container) -and
-                           (Get-ChildItem -Path $_ -Recurse -File -ErrorAction SilentlyContinue |
-                            Select-Object -First 1) }
+        # Resolve each output directory to an absolute path anchored to $PSScriptRoot so
+        # that relative paths (e.g. "./logs") are unambiguous when passed to 7-Zip, which
+        # resolves paths against its own working directory rather than PowerShell's.
+        # Directories outside the script root are excluded as a safety guard.
+        # Empty directories (no files) are also excluded.
+        $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) | ForEach-Object {
+            if ([System.IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $PSScriptRoot $_ }
+        } | Where-Object {
+            $_.StartsWith($PSScriptRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
+            (Test-Path $_ -PathType Container) -and
+            (Get-ChildItem -Path $_ -Recurse -File -ErrorAction SilentlyContinue |
+             Select-Object -First 1)
+        }
 
         Write-Host ""
         if ($dirsToArchive.Count -eq 0) {
