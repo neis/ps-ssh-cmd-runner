@@ -75,8 +75,7 @@
 
 .PARAMETER CompressOutput
     When $true, creates a compressed archive of all output directories at the end of the run.
-    Uses 7-Zip (.7z) if found on the system, otherwise falls back to PowerShell's built-in
-    Compress-Archive (.zip). Default is $false.
+    Uses PowerShell's built-in Compress-Archive to create a .zip archive. Default is $false.
 
 .PARAMETER CompressWhen
     Controls when the archive is created. "Always" creates it regardless of device results.
@@ -372,24 +371,6 @@ public static class CredentialManager {
 '@ -Language CSharp
 }
 
-# ---------------------------------------------
-# HELPER FUNCTION: Locate 7-Zip executable.
-# Checks PATH first, then common Windows install locations.
-# Returns the full path to 7z.exe / 7za.exe, or $null if not found.
-# ---------------------------------------------
-function Find-7Zip {
-    foreach ($name in @('7z.exe', '7za.exe')) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if ($cmd) { return $cmd.Source }
-    }
-    foreach ($path in @(
-        "${env:ProgramFiles}\7-Zip\7z.exe",
-        "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
-    )) {
-        if (Test-Path $path -PathType Leaf) { return $path }
-    }
-    return $null
-}
 
 # ---------------------------------------------
 # HELPER FUNCTION: Detect SSH authentication failure from stderr.
@@ -1211,8 +1192,8 @@ Write-Host "+==================================================+" -ForegroundCol
 
 # ---------------------------------------------
 # POST-RUN COMPRESSION
-# Creates a timestamped archive of all output directories.
-# Uses 7-Zip (.7z) when available, falls back to Compress-Archive (.zip).
+# Creates a timestamped .zip archive of all output directories using
+# PowerShell's built-in Compress-Archive.
 # Source directories are only removed when archive creation is confirmed.
 # ---------------------------------------------
 if ($CompressOutput) {
@@ -1224,38 +1205,29 @@ if ($CompressOutput) {
     }
 
     if ($shouldCompress) {
-        $sevenZipExe = Find-7Zip
-        if ($sevenZipExe) {
-            $archiveName = "ssh-session-${timestamp}.7z"
-        }
-        else {
-            $archiveName = "ssh-session-${timestamp}.zip"
-        }
+        $archiveName = "ssh-session-${timestamp}.zip"
         $archivePath = Join-Path $PSScriptRoot $archiveName
 
-        # Collect all configured output directories that currently exist on disk.
-        # Includes directories from disabled output types if they exist from prior runs.
+        # Collect all configured output directories that exist on disk and contain
+        # at least one file. Empty directories are excluded from the archive.
         $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) |
-            Where-Object { Test-Path $_ -PathType Container }
+            Where-Object {
+                (Test-Path $_ -PathType Container) -and
+                (Get-ChildItem -LiteralPath $_ -Recurse -File -ErrorAction SilentlyContinue |
+                 Select-Object -First 1)
+            }
 
         Write-Host ""
         if ($dirsToArchive.Count -eq 0) {
             Write-Host "Compression skipped: no output directories found on disk." -ForegroundColor Yellow
         }
         else {
-            $engineLabel = if ($sevenZipExe) { "7-Zip" } else { "PowerShell Compress-Archive" }
-            Write-Host "Compressing output via $engineLabel ..." -ForegroundColor Cyan
+            Write-Host "Compressing output via Compress-Archive ..." -ForegroundColor Cyan
 
             $archiveSuccess = $false
             try {
-                if ($sevenZipExe) {
-                    & $sevenZipExe a -mx=5 $archivePath @dirsToArchive | Out-Null
-                    $archiveSuccess = ($LASTEXITCODE -eq 0)
-                }
-                else {
-                    Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
-                    $archiveSuccess = (Test-Path $archivePath)
-                }
+                Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
+                $archiveSuccess = (Test-Path $archivePath)
             }
             catch {
                 Write-Host "  ERROR: Compression failed - $($_.Exception.Message)" -ForegroundColor Red
