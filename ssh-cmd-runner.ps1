@@ -392,6 +392,41 @@ if (-not $CompressOnly) {
         }
         $commandsByOS[$osType] = $cmds
     }
+
+    # Pre-flight check: cisco-wlc-aireos devices require "show sysinfo" in their
+    # command file to extract the device hostname. The WLC prompt does not reliably
+    # contain the hostname, so the System Name field from this command is the only
+    # source. Warn the user if it's missing and let them decide how to proceed.
+    if ('cisco-wlc-aireos' -in $uniqueOSTypes) {
+        $aireosCommands = $commandsByOS['cisco-wlc-aireos']
+        $hasSysinfo = $aireosCommands | Where-Object { $_ -match '^\s*show\s+sysinfo\s*$' }
+        if (-not $hasSysinfo) {
+            Write-Host ""
+            Write-Host "WARNING: cisco-wlc-aireos command file does not include 'show sysinfo'." -ForegroundColor Yellow
+            Write-Host "  WLC AireOS devices require this command to determine the device hostname." -ForegroundColor Yellow
+            Write-Host "  Without it, devices will be logged as 'unknown'." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  [S] Skip all cisco-wlc-aireos devices and continue" -ForegroundColor Cyan
+            Write-Host "  [A] Abort the run" -ForegroundColor Cyan
+            Write-Host "  [C] Continue anyway (hostnames will be 'unknown')" -ForegroundColor Cyan
+            Write-Host ""
+            $response = (Read-Host "  Choice (S/A/C)").ToUpper()
+            if ($response -eq 'S') {
+                Write-Host "  Skipping all cisco-wlc-aireos devices." -ForegroundColor Yellow
+                $devices = @($devices | Where-Object { $_.OS -ne 'cisco-wlc-aireos' })
+                $uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
+                if ($devices.Count -eq 0) {
+                    Write-Host "  No devices remaining after skipping. Exiting." -ForegroundColor Red
+                    exit 0
+                }
+            } elseif ($response -eq 'A') {
+                Write-Host "  Run aborted." -ForegroundColor Red
+                exit 1
+            } else {
+                Write-Host "  Continuing - cisco-wlc-aireos devices will use 'unknown' as hostname." -ForegroundColor Yellow
+            }
+        }
+    }
 }
 
 # ---------------------------------------------
@@ -578,7 +613,7 @@ Set-AskPassScript -ScriptPath $askPassScript -Password $password
 #   Juniper JunOS    :  user@hostname>  user@hostname#
 #   Palo Alto        :  user@hostname>  user@hostname#
 #   HP/Aruba         :  hostname#  hostname>
-#   Cisco WLC        :  (Cisco Controller) >  (WLC7) >  (hostname) >
+#   Cisco WLC        :  (any text) >  — hostname from "show sysinfo" System Name field
 #   Linux-based NOS  :  user@hostname:~$  [user@hostname ~]$
 # ---------------------------------------------
 function Get-HostnameFromPrompt {
@@ -609,19 +644,9 @@ function Get-HostnameFromPrompt {
             return $Matches[1]
         }
 
-        # Cisco WLC AireOS: (hostname) > or (Cisco Controller) >
-        # Extract hostname from the parenthesized prompt. Skip the generic
-        # "(Cisco Controller)" prompt — fall through to the System Name lookup.
-        if ($trimmed -match '^\(([A-Za-z0-9._-]+)\)\s*>') {
-            $wlcName = $Matches[1]
-            if ($wlcName -ne 'Cisco Controller') {
-                return $wlcName
-            }
-        }
-
-        # Cisco WLC fallback: hostname from "show sysinfo" output (System Name field).
-        # Used when the prompt is the generic "(Cisco Controller) >" which doesn't
-        # contain the hostname.
+        # Cisco WLC AireOS: hostname from "show sysinfo" output (System Name field).
+        # WLC prompts like "(Cisco Controller) >", "(WLC7) >", etc. are not reliable
+        # sources of hostname — always extract from the System Name field instead.
         if ($trimmed -match '^System Name\.+\s+(\S+)') {
             return $Matches[1]
         }
@@ -892,7 +917,7 @@ function Invoke-SSHSession {
         # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
         # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
         $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([A-Za-z0-9._-]+\)\s*>)',
+            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([^)]+\)\s*>)',
             [System.Text.RegularExpressions.RegexOptions]::Compiled
         )
         # Compiled interactive prompt regex for auto-responding to mid-command prompts.
@@ -917,7 +942,7 @@ function Invoke-SSHSession {
         # The outer scope overwrites these; the runspace reads them on every character.
         # String reference assignment is atomic in .NET.
         $regexHolder = [string[]]::new(2)
-        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([A-Za-z0-9._-]+\)\s*>)\s*$'
+        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>)\s*$'
         $regexHolder[1] = $InteractivePattern   # populated per-OS if interactive prompts are needed
 
         $readerRunspace = [PowerShell]::Create()
@@ -1018,12 +1043,13 @@ function Invoke-SSHSession {
 
             # Update the shared holder so the already-running reader runspace picks up
             # the tighter pattern on its next character iteration.
-            # Includes WLC-style (hostname) > pattern for AireOS devices.
-            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\($hn\)\s*>)\s*`$"
+            # Always include the broad WLC pattern — hostname can't be extracted from
+            # WLC prompts, so the parenthesized pattern stays broad throughout the session.
+            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>)\s*`$"
 
             # Replace the compiled Regex used by Read-UntilPrompt for all subsequent calls.
             $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)|(?:^\($hn\)\s*>)",
+                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)|(?:^\([^)]+\)\s*>)",
                 [System.Text.RegularExpressions.RegexOptions]::Compiled
             )
         }
