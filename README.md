@@ -426,22 +426,44 @@ Or in `config.json`:
 
 ### Option 2 -- SSH config file (recommended for permanent environments)
 
-A per-host SSH config file at `~\.ssh\config` (i.e. `C:\Users\<you>\.ssh\config`) is read
+A per-user SSH config file at `~\.ssh\config` (i.e. `C:\Users\<you>\.ssh\config`) is read
 automatically by `ssh.exe` for every connection. Placing legacy settings here removes the
-need to pass `ExtraSSHOptions` at all.
+need to pass `ExtraSSHOptions` at all and applies them to manual SSH sessions too.
 
 Create or append to `~\.ssh\config`:
 
 ```
-Host 10.*
-  User nimda
-  Port 22
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  MACs +hmac-sha1,hmac-sha1-96
-  KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
-  HostKeyAlgorithms +ssh-rsa
+# Legacy device support — re-enable algorithms disabled by modern OpenSSH
+Host *
+    User vndrjneisler
+    Port 22
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+
+    # Key exchange: group1-sha1 (IOS 12.x), group-exchange-sha1 (older IOS-XE),
+    # group14-sha1 (mid-era devices)
+    KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group-exchange-sha1,diffie-hellman-group14-sha1
+
+    # Ciphers: CBC modes required by devices that don't support CTR or GCM
+    Ciphers +aes128-cbc,3des-cbc,aes192-cbc,aes256-cbc
+
+    # MACs: SHA1-based MACs for older firmware
+    MACs +hmac-sha1,hmac-sha1-96
+
+    # Host key + pubkey: RSA (most legacy devices) and DSA (very old IOS 12.x)
+    HostKeyAlgorithms +ssh-rsa,ssh-dss
+    PubkeyAcceptedAlgorithms +ssh-rsa,ssh-dss
+
+    # Keep long sessions alive through firewalls/NAT that drop idle connections
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
 ```
+
+The `+` prefix appends to the default algorithm list rather than replacing it, so modern
+devices continue to negotiate the strongest available algorithms.
+
+> **Note:** `StrictHostKeyChecking` and `UserKnownHostsFile` are already set by the script
+> via `-o` flags. Including them here is optional but convenient for manual SSH sessions.
 
 ## SUPPORTED DEVICE PROMPT FORMATS
 
