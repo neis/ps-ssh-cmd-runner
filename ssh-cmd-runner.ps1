@@ -16,7 +16,7 @@
 
 .PARAMETER CommandsDirectory
     Directory containing per-OS command files. Each file must be named
-    <os-type>.txt (e.g. cisco-ios.txt, cisco-nxos.txt) matching the OS
+    <os-type>.txt (e.g. cisco-iosxe.txt, cisco-nxos.txt) matching the OS
     column in the device CSV. Default is .\commands.
 
 .PARAMETER LogDirectory
@@ -287,7 +287,6 @@ $thinSep = ("-" * 40)
 # SendInitialNewline  : send an empty line after SSH session starts to trigger the CLI prompt
 #                       (some devices wait for a keystroke before displaying the prompt)
 $validOSTypes = @{
-    'cisco-ios'        = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
     'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
     'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';     RequirePTY = $true;  ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
     'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$'; SendInitialNewline = $true }

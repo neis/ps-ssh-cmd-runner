@@ -36,16 +36,18 @@ subsequent runs do not re-prompt as long as the stored credentials remain valid.
 ## QUICK START
 
 1. Create a `devices.txt` CSV file:
+
    ```csv
    IP,OS
-   10.1.1.1,cisco-ios
+   10.1.1.1,cisco-iosxe
    10.1.1.2,cisco-nxos
    10.1.1.3,cisco-wlc-aireos
    ```
 
 2. Create a `commands/` directory with per-OS command files:
+
    ```
-   commands/cisco-ios.txt
+   commands/cisco-iosxe.txt
    commands/cisco-nxos.txt
    commands/cisco-wlc-aireos.txt
    ```
@@ -61,13 +63,12 @@ See the `Examples/` directory for sample files.
 
 Each OS type defines automatic behaviors for paging, PTY allocation, and session teardown.
 
-| OS Type | Platform | Paging Command | PTY | Exit Sequence |
-|---------|----------|---------------|-----|---------------|
-| `cisco-ios` | Cisco IOS (Catalyst 2960, etc.) | `terminal length 0` | Auto | `exit` |
-| `cisco-iosxe` | Cisco IOS-XE (Catalyst 3850/9K) | `terminal length 0` | Auto | `exit` |
-| `cisco-nxos` | Cisco NX-OS (Nexus 5K/7K/9K) | `terminal length 0` | Always | `exit` |
-| `cisco-wlc-aireos` | Cisco WLC AireOS (5520, etc.) | `config paging disable` | Always | `logout` then `n` |
-| `cisco-wlc-iosxe` | Cisco WLC IOS-XE (Catalyst 9800) | `terminal length 0` | Auto | `exit` |
+| OS Type            | Platform                              | Paging Command          | PTY    | Exit Sequence     |
+| ------------------ | ------------------------------------- | ----------------------- | ------ | ----------------- |
+| `cisco-iosxe`      | Cisco IOS / IOS-XE (Catalyst, ISR)    | `terminal length 0`     | Auto   | `exit`            |
+| `cisco-nxos`       | Cisco NX-OS (Nexus 5K/7K/9K)     | `terminal length 0`     | Always | `exit`            |
+| `cisco-wlc-aireos` | Cisco WLC AireOS (5520, etc.)    | `config paging disable` | Always | `logout` then `n` |
+| `cisco-wlc-iosxe`  | Cisco WLC IOS-XE (Catalyst 9800) | `terminal length 0`     | Auto   | `exit`            |
 
 **Paging Command** is sent silently after login and does not appear in log output.
 
@@ -119,7 +120,7 @@ values. Blank rows and rows where the IP starts with `#` are ignored. Default: `
 
 **CommandsDirectory** `[string]`
 Directory containing per-OS command files. Each file must be named `<os-type>.txt`
-(e.g. `cisco-ios.txt`, `cisco-nxos.txt`) matching the OS column in the device CSV.
+(e.g. `cisco-iosxe.txt`, `cisco-nxos.txt`) matching the OS column in the device CSV.
 Only files for OS types present in the device list are required. Default: `.\commands`
 
 **LogDirectory** `[string]`
@@ -226,7 +227,6 @@ CSV are required.
 
 ```
 commands/
-  cisco-ios.txt
   cisco-iosxe.txt
   cisco-nxos.txt
   cisco-wlc-aireos.txt
@@ -237,9 +237,10 @@ Each file contains one command per line. Blank lines and lines starting with `#`
 **Do not include paging-disable commands** (e.g. `terminal length 0`) in these files -- the
 script sends the appropriate paging command automatically based on the OS type.
 
-Example `commands/cisco-ios.txt`:
+Example `commands/cisco-iosxe.txt`:
+
 ```
-# Cisco IOS discovery commands
+# Cisco IOS / IOS-XE discovery commands
 show startup-config | include hostname
 show version
 show inventory
@@ -250,6 +251,7 @@ show run
 ```
 
 Example `commands/cisco-wlc-aireos.txt`:
+
 ```
 # Cisco WLC AireOS discovery commands
 show sysinfo
@@ -309,7 +311,7 @@ breakdowns:
     },
     "commands_directory": "./commands",
     "os_types": {
-      "cisco-ios": {
+      "cisco-iosxe": {
         "device_count": 1,
         "command_count": 7,
         "commands": ["show version", "show inventory", "..."]
@@ -434,8 +436,8 @@ Create or append to `~\.ssh\config`:
 
 ```
 # Legacy device support — re-enable algorithms disabled by modern OpenSSH
-Host *
-    User vndrjneisler
+Host 10.*
+    User nimda
     Port 22
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
@@ -470,16 +472,16 @@ devices continue to negotiate the strongest available algorithms.
 The script recognises the following prompt styles when detecting the CLI prompt and
 parsing the device hostname from output:
 
-| Vendor / OS            | Example prompt                          |
-| ---------------------- | --------------------------------------- |
-| Cisco IOS / IOS-XE     | `hostname#` `hostname>`                 |
-| Cisco NX-OS            | `hostname#` `hostname(config)#`         |
-| Cisco WLC AireOS       | `(Cisco Controller) >`                  |
-| Arista EOS             | `hostname#` `hostname>`                 |
-| Juniper JunOS          | `user@hostname>` `user@hostname#`       |
-| Palo Alto PAN-OS       | `user@hostname>` `user@hostname#`       |
-| HP / Aruba             | `hostname#` `hostname>`                 |
-| Linux-based NOS        | `user@hostname:~$` `[user@hostname ~]$` |
+| Vendor / OS        | Example prompt                          |
+| ------------------ | --------------------------------------- |
+| Cisco IOS / IOS-XE | `hostname#` `hostname>`                 |
+| Cisco NX-OS        | `hostname#` `hostname(config)#`         |
+| Cisco WLC AireOS   | `(Cisco Controller) >`                  |
+| Arista EOS         | `hostname#` `hostname>`                 |
+| Juniper JunOS      | `user@hostname>` `user@hostname#`       |
+| Palo Alto PAN-OS   | `user@hostname>` `user@hostname#`       |
+| HP / Aruba         | `hostname#` `hostname>`                 |
+| Linux-based NOS    | `user@hostname:~$` `[user@hostname ~]$` |
 
 For Cisco WLC AireOS, the hostname is extracted from the `System Name` field in
 `show sysinfo` output, since the WLC prompt does not contain the hostname.
