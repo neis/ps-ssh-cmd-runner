@@ -961,7 +961,7 @@ function Invoke-SSHSession {
         # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
         # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
         $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([^)]+\)\s*>)',
+            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([^)]+\)\s*>)',
             [System.Text.RegularExpressions.RegexOptions]::Compiled
         )
         # Compiled interactive prompt regex for auto-responding to mid-command prompts.
@@ -993,7 +993,7 @@ function Invoke-SSHSession {
         # The outer scope overwrites these; the runspace reads them on every character.
         # String reference assignment is atomic in .NET.
         $regexHolder = [string[]]::new(3)
-        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>)\s*$'
+        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>)\s*$'
         $regexHolder[1] = $InteractivePattern   # populated per-OS if interactive prompts are needed
         $regexHolder[2] = '^\s*:\s*$'           # bare ":" pager prompt (more/less)
 
