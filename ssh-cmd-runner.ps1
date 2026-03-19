@@ -279,15 +279,17 @@ $separator = ("=" * 59)
 $thinSep = ("-" * 40)
 
 # Valid OS types and their session behaviors.
-# PagingCommand  : sent silently after login to disable output paging
-# RequirePTY     : force PTY allocation (-tt) for this OS (overrides AllocatePTY)
-# ExitCommands   : sequence sent to close the session cleanly (e.g. "logout" then "n" for save prompt)
+# PagingCommand       : sent silently after login to disable output paging
+# RequirePTY          : force PTY allocation (-tt) for this OS (overrides AllocatePTY)
+# ExitCommands        : sequence sent to close the session cleanly (e.g. "logout" then "n" for save prompt)
+# InteractivePattern  : regex matching mid-command prompts that need auto-response "y"
+#                       (e.g. WLC pagination "would you like to display the next N entries? (y/n)")
 $validOSTypes = @{
-    'cisco-ios'        = @{ PagingCommand = 'terminal length 0';    RequirePTY = $false; ExitCommands = @('exit') }
-    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';    RequirePTY = $false; ExitCommands = @('exit') }
-    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';    RequirePTY = $true;  ExitCommands = @('exit') }
-    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n') }
-    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';    RequirePTY = $false; ExitCommands = @('exit') }
+    'cisco-ios'        = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');       InteractivePattern = '' }
+    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');       InteractivePattern = '' }
+    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';     RequirePTY = $true;  ExitCommands = @('exit');       InteractivePattern = '' }
+    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$' }
+    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');       InteractivePattern = '' }
 }
 
 # Validate input files exist (skip when only compressing)
@@ -643,6 +645,12 @@ function ConvertTo-SafeFileName {
 # When a prompt is found it is NOT written to Builder — instead it is returned
 # via the [ref] $PromptText parameter so the caller can join it with the
 # echoed command that follows, reproducing the natural "hostname#command" layout.
+#
+# Optional interactive prompt handling:
+#   $StdIn            — the process stdin stream (for writing auto-responses)
+#   $InteractiveRegex — compiled regex matching mid-command prompts (e.g. WLC
+#                       pagination "(y/n)"). When a dequeued line matches, "y"
+#                       is written to stdin and the line is discarded (not logged).
 # ---------------------------------------------
 function Read-UntilPrompt {
     param(
@@ -650,7 +658,9 @@ function Read-UntilPrompt {
         [System.Text.StringBuilder]$Builder,
         [System.Text.RegularExpressions.Regex]$PromptRegex,
         [int]$TimeoutMs,
-        [ref]$PromptText
+        [ref]$PromptText,
+        [System.IO.StreamWriter]$StdIn = $null,
+        [System.Text.RegularExpressions.Regex]$InteractiveRegex = $null
     )
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     $line = $null
@@ -667,6 +677,16 @@ function Read-UntilPrompt {
                 # The caller will prepend it to the echoed command line.
                 if ($null -ne $PromptText) { $PromptText.Value = $line.TrimEnd() }
                 return $true
+            }
+            # Auto-respond to interactive mid-command prompts (e.g. WLC pagination).
+            # Send "y", discard the prompt line (don't log it), and keep waiting.
+            if ($null -ne $InteractiveRegex -and $null -ne $StdIn -and $InteractiveRegex.IsMatch($line.TrimEnd())) {
+                $StdIn.WriteLine("y")
+                $StdIn.Flush()
+                # Don't append to Builder — keep pagination prompts out of the log.
+                # Reset deadline since the device is actively sending data.
+                $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+                continue
             }
             $Builder.AppendLine($line) | Out-Null
         }
@@ -779,7 +799,8 @@ function Invoke-SSHSession {
         [bool]$AllocatePTY = $false,
         [string[]]$PagingCommands = @(),
         [string[]]$ExitCommands = @('exit'),
-        [string]$OSType = ""
+        [string]$OSType = "",
+        [string]$InteractivePattern = ""
     )
 
     $result = [PSCustomObject]@{
@@ -874,6 +895,15 @@ function Invoke-SSHSession {
             '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([A-Za-z0-9._-]+\)\s*>)',
             [System.Text.RegularExpressions.RegexOptions]::Compiled
         )
+        # Compiled interactive prompt regex for auto-responding to mid-command prompts.
+        # Only built when the OS type defines an InteractivePattern (e.g. WLC AireOS pagination).
+        $interactiveRegex = $null
+        if ($InteractivePattern -ne '') {
+            $interactiveRegex = [System.Text.RegularExpressions.Regex]::new(
+                $InteractivePattern,
+                [System.Text.RegularExpressions.RegexOptions]::Compiled
+            )
+        }
         # Cisco IOS sends the prompt without a trailing newline even without a PTY,
         # so ReadLine() would block indefinitely on the prompt line. The runspace
         # reads one character at a time and flushes to the queue on every newline
@@ -881,11 +911,14 @@ function Invoke-SSHSession {
         # The prompt-flush regex requires a valid hostname prefix before # or >
         # so that pager strings like "--More--" are never mistaken for a prompt.
         $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-        # Single-element array shared with the reader runspace as a mutable regex slot.
-        # The outer scope overwrites [0] once the device hostname is known; the runspace
-        # reads it on every character iteration. String reference assignment is atomic in .NET.
-        $regexHolder = [string[]]::new(1)
+        # Two-element array shared with the reader runspace as mutable regex slots.
+        # [0] = device prompt pattern (updated after hostname discovery)
+        # [1] = interactive prompt pattern (e.g. WLC pagination "(y/n)")
+        # The outer scope overwrites these; the runspace reads them on every character.
+        # String reference assignment is atomic in .NET.
+        $regexHolder = [string[]]::new(2)
         $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([A-Za-z0-9._-]+\)\s*>)\s*$'
+        $regexHolder[1] = $InteractivePattern   # populated per-OS if interactive prompts are needed
 
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
@@ -904,11 +937,15 @@ function Invoke-SSHSession {
                         else {
                             $buf.Append($ch) | Out-Null
                             $s = $buf.ToString()
-                            # Flush when the buffer matches the current prompt pattern.
+                            # Flush when the buffer matches the device prompt or an
+                            # interactive prompt (e.g. WLC pagination "(y/n)").
                             # After the hostname is discovered the outer scope writes a
                             # tighter hostname-anchored pattern into $holder[0], preventing
                             # table column headers (e.g. "Switch#") from being flushed.
                             if ($s -match $holder[0]) {
+                                $queue.Enqueue($s)
+                                $buf.Clear() | Out-Null
+                            } elseif ($holder[1] -and $s -match $holder[1]) {
                                 $queue.Enqueue($s)
                                 $buf.Clear() | Out-Null
                             }
@@ -1049,7 +1086,7 @@ function Invoke-SSHSession {
             # echo line (e.g. "cs3850x-1#term len 0") without re-parsing raw output.
             $cmdPrompt = $lastPrompt
             $lastPrompt = ""
-            if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
+            if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex)) {
                 # Flush any partial output received before the timeout so it appears
                 # in the failure log's PARTIAL OUTPUT section for troubleshooting.
                 if ($cmdOutputBuilder.Length -gt 0) {
@@ -1395,6 +1432,7 @@ foreach ($device in $devices) {
     $pagingCmds = @($osProfile.PagingCommand)
     $exitCmds = $osProfile.ExitCommands
     $devicePTY = $AllocatePTY -or $osProfile.RequirePTY
+    $interactivePattern = $osProfile.InteractivePattern
 
     # Pre-connection ping test: skip unreachable devices immediately.
     if ($PingTest) {
@@ -1428,7 +1466,8 @@ foreach ($device in $devices) {
         -AllocatePTY           $devicePTY `
         -PagingCommands        $pagingCmds `
         -ExitCommands          $exitCmds `
-        -OSType                $os
+        -OSType                $os `
+        -InteractivePattern    $interactivePattern
 
     if ($sessionResult.Status -eq "Success") {
         Write-Host "OK " -ForegroundColor Green -NoNewline
