@@ -576,7 +576,7 @@ Set-AskPassScript -ScriptPath $askPassScript -Password $password
 #   Juniper JunOS    :  user@hostname>  user@hostname#
 #   Palo Alto        :  user@hostname>  user@hostname#
 #   HP/Aruba         :  hostname#  hostname>
-#   Cisco WLC        :  (Cisco Controller) >  (hostname from "show sysinfo")
+#   Cisco WLC        :  (Cisco Controller) >  (WLC7) >  (hostname) >
 #   Linux-based NOS  :  user@hostname:~$  [user@hostname ~]$
 # ---------------------------------------------
 function Get-HostnameFromPrompt {
@@ -607,9 +607,19 @@ function Get-HostnameFromPrompt {
             return $Matches[1]
         }
 
-        # Cisco WLC: hostname from "show sysinfo" output (System Name field).
-        # The WLC prompt "(Cisco Controller) >" doesn't contain the hostname,
-        # so we extract it from command output instead.
+        # Cisco WLC AireOS: (hostname) > or (Cisco Controller) >
+        # Extract hostname from the parenthesized prompt. Skip the generic
+        # "(Cisco Controller)" prompt — fall through to the System Name lookup.
+        if ($trimmed -match '^\(([A-Za-z0-9._-]+)\)\s*>') {
+            $wlcName = $Matches[1]
+            if ($wlcName -ne 'Cisco Controller') {
+                return $wlcName
+            }
+        }
+
+        # Cisco WLC fallback: hostname from "show sysinfo" output (System Name field).
+        # Used when the prompt is the generic "(Cisco Controller) >" which doesn't
+        # contain the hostname.
         if ($trimmed -match '^System Name\.+\s+(\S+)') {
             return $Matches[1]
         }
@@ -861,7 +871,7 @@ function Invoke-SSHSession {
         # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
         # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
         $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\(Cisco Controller\)\s*[>#])',
+            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([A-Za-z0-9._-]+\)\s*>)',
             [System.Text.RegularExpressions.RegexOptions]::Compiled
         )
         # Cisco IOS sends the prompt without a trailing newline even without a PTY,
@@ -875,7 +885,7 @@ function Invoke-SSHSession {
         # The outer scope overwrites [0] once the device hostname is known; the runspace
         # reads it on every character iteration. String reference assignment is atomic in .NET.
         $regexHolder = [string[]]::new(1)
-        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\(Cisco Controller\)\s*[>#])\s*$'
+        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([A-Za-z0-9._-]+\)\s*>)\s*$'
 
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
@@ -971,11 +981,12 @@ function Invoke-SSHSession {
 
             # Update the shared holder so the already-running reader runspace picks up
             # the tighter pattern on its next character iteration.
-            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>])\s*`$"
+            # Includes WLC-style (hostname) > pattern for AireOS devices.
+            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\($hn\)\s*>)\s*`$"
 
             # Replace the compiled Regex used by Read-UntilPrompt for all subsequent calls.
             $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)",
+                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)|(?:^\($hn\)\s*>)",
                 [System.Text.RegularExpressions.RegexOptions]::Compiled
             )
         }
