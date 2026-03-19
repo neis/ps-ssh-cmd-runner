@@ -1264,51 +1264,19 @@ foreach ($device in $devices) {
         }
     }
 
-    # Auth retry loop — retries the same device when credentials are rejected.
-    # Non-auth failures (timeout, connectivity) break out immediately.
-    do {
-        $sessionResult = Invoke-SSHSession `
-            -IPAddress             $ip `
-            -User                  $username `
-            -CommandList           $commands `
-            -Timeout               $TimeoutSeconds `
-            -SSHOptions            $ExtraSSHOptions `
-            -CmdDelayMs            $CommandDelayMs `
-            -CmdTimeoutSec         $CommandTimeoutSeconds `
-            -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds `
-            -AllocatePTY           $devicePTY `
-            -PagingCommands        $pagingCmds `
-            -ExitCommands          $exitCmds `
-            -OSType                $os
-
-        if ($sessionResult.AuthFailed) {
-            $authRetryCount++
-            Write-Host ""
-            Write-Host "  Authentication rejected by $ip." -ForegroundColor Red
-
-            if ($authRetryCount -ge $maxAuthRetries) {
-                Write-Host "  ERROR: Credentials rejected $maxAuthRetries consecutive time(s). Aborting." -ForegroundColor Red
-                try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
-                $password = $null
-                [System.GC]::Collect()
-                exit 1
-            }
-
-            Write-Host "  Retry $authRetryCount of $($maxAuthRetries - 1) - please enter updated credentials." -ForegroundColor Yellow
-            $credential = Get-Credential -Message "Credentials rejected - enter new credentials (retry $authRetryCount of $($maxAuthRetries - 1))"
-            if ($null -eq $credential) {
-                Write-Host "  Credential prompt cancelled. Aborting." -ForegroundColor Red
-                try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
-                exit 1
-            }
-            $username         = $credential.UserName
-            $password         = $credential.GetNetworkCredential().Password
-            $credentialsSaved = $false   # new credentials must be saved after next success
-            Set-AskPassScript -ScriptPath $askPassScript -Password $password
-
-            Write-Host "[$deviceNum/$($devices.Count)] Retrying $ip ... " -NoNewline
-        }
-    } while ($sessionResult.AuthFailed)
+    $sessionResult = Invoke-SSHSession `
+        -IPAddress             $ip `
+        -User                  $username `
+        -CommandList           $commands `
+        -Timeout               $TimeoutSeconds `
+        -SSHOptions            $ExtraSSHOptions `
+        -CmdDelayMs            $CommandDelayMs `
+        -CmdTimeoutSec         $CommandTimeoutSeconds `
+        -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds `
+        -AllocatePTY           $devicePTY `
+        -PagingCommands        $pagingCmds `
+        -ExitCommands          $exitCmds `
+        -OSType                $os
 
     if ($sessionResult.Status -eq "Success") {
         Write-Host "OK " -ForegroundColor Green -NoNewline
@@ -1321,12 +1289,30 @@ foreach ($device in $devices) {
             }
             $credentialsSaved = $true
         }
-        $authRetryCount = 0   # reset consecutive failure counter on any successful connection
+        $authRetryCount = 0   # reset consecutive auth failure counter on any success
+    }
+    elseif ($sessionResult.AuthFailed) {
+        $authRetryCount++
+        Write-Host "FAILED: " -ForegroundColor Red -NoNewline
+        Write-Host "Authentication rejected ($authRetryCount of $maxAuthRetries consecutive)" -ForegroundColor DarkRed
+
+        if ($authRetryCount -ge $maxAuthRetries) {
+            $results.Add($sessionResult)
+            Write-Host ""
+            Write-Host "  ERROR: Authentication rejected on $maxAuthRetries consecutive devices. Aborting." -ForegroundColor Red
+            Write-Host "  This usually indicates expired or incorrect credentials." -ForegroundColor Red
+            try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            $password = $null
+            [System.GC]::Collect()
+            break   # exit the foreach device loop — proceed to summary
+        }
     }
     else {
         Write-Host "FAILED: " -ForegroundColor Red -NoNewline
         Write-Host "$($sessionResult.Error)" -ForegroundColor DarkRed
-        # Non-auth failures (timeouts, connectivity) do not consume the retry budget.
+        # Non-auth failures (timeouts, connectivity) reset the consecutive auth counter
+        # since they break the streak of auth rejections.
+        $authRetryCount = 0
     }
 
     $results.Add($sessionResult)
