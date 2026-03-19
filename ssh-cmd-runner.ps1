@@ -618,9 +618,10 @@ function Invoke-SSHSession {
 
     try {
         # Build ssh arguments
+        $ptyFlag = if ($usePTY) { "-tt" } else { "-T" }
         $sshArgs = @(
             "-v",
-            $(if ($usePTY) { "-tt" } else { "-T" }),
+            $ptyFlag,
             "-o", "ConnectTimeout=$Timeout",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -746,7 +747,7 @@ function Invoke-SSHSession {
             if (-not $promptFound) {
                 # Check stderr for stty failure — indicates device requires PTY allocation.
                 if ($stdErrBuilder.ToString() -match "stty.*Inappropriate ioctl") {
-                    Write-Verbose "stty error detected on $IPAddress — retrying with PTY allocation (-tt)"
+                    Write-Verbose "stty error detected on $IPAddress - retrying with PTY allocation (-tt)"
                     $usePTY = $true
                     continue   # finally cleans up this attempt, loop retries with -tt
                 }
@@ -936,7 +937,7 @@ function Invoke-SSHSession {
             " Status    : $($result.Status)"
             " Conn Tmout: ${Timeout}s"
             " Cmd Tmout : ${CmdTimeoutSec}s"
-            " PTY      : $(if ($usePTY) { 'Yes (-tt)' } else { 'No (-T)' })"
+            " PTY      : $ptyFlag"
             $separator
             ""
             "$thinSep COMMANDS SENT $thinSep"
@@ -993,7 +994,7 @@ function Invoke-SSHSession {
             " Status    : FAILED"
             " Conn Tmout: ${Timeout}s"
             " Cmd Tmout : ${CmdTimeoutSec}s"
-            " PTY      : $(if ($usePTY) { 'Yes (-tt)' } else { 'No (-T)' })"
+            " PTY      : $ptyFlag"
             $separator
             ""
             "ERROR: $($result.Error)"
