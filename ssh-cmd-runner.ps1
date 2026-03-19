@@ -54,6 +54,12 @@
     the script auto-detects stty failures and retries with PTY automatically.
     Set to $true to skip the failed first attempt for known PTY-dependent devices.
 
+.PARAMETER PingTest
+    When $true, sends a single ICMP ping to each device before attempting SSH.
+    Devices that do not respond are skipped immediately, avoiding the full SSH
+    connection timeout. Disable if your network blocks ICMP but allows SSH.
+    Default is $true.
+
 .PARAMETER JsonDirectory
     Directory where JSON output files will be saved. Created automatically if it doesn't exist.
     Each run produces a timestamped session summary (ssh-session-<timestamp>.json) plus one
@@ -165,6 +171,9 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Force PTY allocation (-tt) for devices requiring a terminal (default: false, auto-detects)")]
     [bool]$AllocatePTY = $false,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Ping each device before SSH to skip unreachable hosts (default: true)")]
+    [bool]$PingTest = $true,
+
     [Parameter(Mandatory = $false, HelpMessage = "Directory where the JSON output file will be saved. Created automatically if it doesn't exist.")]
     [string]$JsonDirectory = ".\json",
 
@@ -215,7 +224,7 @@ if (Test-Path $configPath -PathType Leaf) {
     $requiredKeys = @(
         'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
         'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds', 'InitialPromptTimeoutSeconds',
-        'AllocatePTY',
+        'AllocatePTY', 'PingTest',
         'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled',
         'CredentialLabel', 'ClearCredentials',
         'CompressOutput', 'CompressWhen', 'DeleteAfterCompress'
@@ -235,6 +244,7 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds'))        { $CommandTimeoutSeconds        = [int]$config.CommandTimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('InitialPromptTimeoutSeconds')) { $InitialPromptTimeoutSeconds = [int]$config.InitialPromptTimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('AllocatePTY'))              { $AllocatePTY              = [bool]$config.AllocatePTY }
+    if (-not $PSBoundParameters.ContainsKey('PingTest'))                { $PingTest                = [bool]$config.PingTest }
     if (-not $PSBoundParameters.ContainsKey('JsonDirectory'))         { $JsonDirectory         = $config.JsonDirectory }
     if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory'))        { $NetcortexDirectory        = $config.NetcortexDirectory }
     if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
@@ -765,6 +775,13 @@ function Invoke-SSHSession {
         }
 
         if (-not $promptFound) {
+            # Aggressive fallback: if this was a -T attempt with zero stdout, retry with PTY.
+            # Covers devices that need PTY but don't produce the stty error (e.g. libssh servers).
+            if (-not $usePTY -and $ptyAttempt -eq 0 -and $stdOutBuilder.Length -eq 0) {
+                Write-Verbose "Zero stdout on $IPAddress after ${InitialCmdTimeoutSec}s - retrying with PTY allocation (-tt)"
+                $usePTY = $true
+                continue   # finally cleans up, loop retries with -tt
+            }
             if (-not $proc.HasExited) { $proc.Kill() }
             throw "Timed out waiting for initial device prompt after ${InitialCmdTimeoutSec}s. Consider increasing -InitialPromptTimeoutSeconds."
         }
@@ -1066,6 +1083,8 @@ $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
 $iniTimeoutStr = "${InitialPromptTimeoutSeconds}s".PadRight(37)
 $ptyStr = if ($AllocatePTY) { "Enabled (-tt)" } else { "Auto (-T, fallback -tt)" }
 $ptyStr = $ptyStr.PadRight(37)
+$pingStr = if ($PingTest) { "Enabled" } else { "Disabled" }
+$pingStr = $pingStr.PadRight(37)
 $credLabelStr = $CredentialLabel
 if ($credLabelStr.Length -gt 37) { $credLabelStr = $credLabelStr.Substring(0, 34) + "..." }
 $credLabelStr = $credLabelStr.PadRight(37)
@@ -1098,6 +1117,7 @@ Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Ini Tmout: ${iniTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  PTY Mode : ${ptyStr}|" -ForegroundColor Gray
+Write-Host "|  Ping Test: ${pingStr}|" -ForegroundColor Gray
 Write-Host "|  SSH Creds: ${credLabelStr}|" -ForegroundColor Gray
 Write-Host "|  Compress : ${compressStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
@@ -1120,6 +1140,26 @@ $maxAuthRetries = 3
 foreach ($ip in $devices) {
     $deviceNum++
     Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ... " -NoNewline
+
+    # Pre-connection ping test: skip unreachable devices immediately.
+    if ($PingTest) {
+        $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
+        if (-not $pingResult) {
+            Write-Host "SKIPPED (no ping response)" -ForegroundColor Yellow
+            $results.Add([PSCustomObject]@{
+                IPAddress      = $ip
+                DeviceName     = "unknown"
+                Status         = "Skipped"
+                LogFile        = ""
+                Error          = "No ping response - device unreachable"
+                AuthFailed     = $false
+                Duration       = [TimeSpan]::Zero
+                Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+            })
+            continue
+        }
+    }
 
     # Auth retry loop — retries the same device when credentials are rejected.
     # Non-auth failures (timeout, connectivity) break out immediately.
@@ -1190,7 +1230,7 @@ foreach ($ip in $devices) {
 # OUTPUT AGGREGATES
 # ---------------------------------------------
 $successResults = @($results | Where-Object { $_.Status -eq "Success" })
-$failedIPs      = @($results | Where-Object { $_.Status -ne "Success" } | ForEach-Object { $_.IPAddress })
+$failedIPs      = @($results | Where-Object { $_.Status -eq "Failed" } | ForEach-Object { $_.IPAddress })
 
 # ---------------------------------------------
 # NETCORTEX OUTPUT
@@ -1272,11 +1312,13 @@ if ($JsonEnabled) {
 # SUMMARY REPORT
 # ---------------------------------------------
 $successCount = @($results | Where-Object { $_.Status -eq "Success" }).Count
-$failCount = @($results | Where-Object { $_.Status -ne "Success" }).Count
+$skippedCount = @($results | Where-Object { $_.Status -eq "Skipped" }).Count
+$failCount    = @($results | Where-Object { $_.Status -eq "Failed" }).Count
 $failColor = if ($failCount -gt 0) { "Red" } else { "Gray" }
 
 $totalStr = "$($results.Count)".PadRight(36)
 $successStr = "$successCount".PadRight(36)
+$skippedStr = "$skippedCount".PadRight(36)
 $failStr = "$failCount".PadRight(36)
 
 Write-Host ""
@@ -1287,6 +1329,11 @@ Write-Host "|  Total     : ${totalStr}|" -ForegroundColor Gray
 Write-Host "|  Succeeded : " -NoNewline
 Write-Host "${successStr}" -ForegroundColor Green -NoNewline
 Write-Host "|"
+if ($skippedCount -gt 0) {
+    Write-Host "|  Skipped   : " -NoNewline
+    Write-Host "${skippedStr}" -ForegroundColor Yellow -NoNewline
+    Write-Host "|"
+}
 Write-Host "|  Failed    : " -NoNewline
 Write-Host "${failStr}" -ForegroundColor $failColor -NoNewline
 Write-Host "|"

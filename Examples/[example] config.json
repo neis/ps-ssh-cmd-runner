@@ -8,6 +8,7 @@
     "CommandTimeoutSeconds": 30,
     "InitialPromptTimeoutSeconds": 60,
     "AllocatePTY": false,
+    "PingTest": true,
     "JsonDirectory": "./json",
     "NetcortexDirectory": "./netcortex",
     "LogEnabled": true,

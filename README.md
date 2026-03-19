@@ -103,6 +103,11 @@ When `$false` (default), the script auto-detects `stty` failures and retries wit
 automatically. Set to `$true` to skip the failed first attempt for known PTY-dependent
 devices. Default: `$false`
 
+**PingTest** `[bool]`
+Send a single ICMP ping to each device before attempting SSH. Devices that do not respond
+are skipped immediately, avoiding the full SSH connection timeout. Disable if your network
+blocks ICMP but allows SSH. Default: `$true`
+
 **ExtraSSHOptions** `[string[]]`
 Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly
 used for legacy devices that require older key exchange or cipher algorithms. See
