@@ -888,23 +888,30 @@ function Invoke-SSHSession {
         # Write the final prompt (returned after the last command's output) so
         # the log ends exactly as a real terminal session would.
         if ($lastPrompt -ne "") { $stdOutBuilder.AppendLine($lastPrompt) | Out-Null }
+
+        # With PTY (-tt), closing stdin does NOT cause the remote session to end —
+        # the PTY keeps the shell alive indefinitely. Send "exit" to cleanly close
+        # the remote CLI session before closing stdin.
+        if ($usePTY) {
+            $proc.StandardInput.WriteLine("exit")
+            $proc.StandardInput.Flush()
+        }
         $proc.StandardInput.Close()
 
         # Drain any remaining output after stdin is closed (e.g. logout messages).
         Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs ([Math]::Min($perCmdTimeoutMs, 5000)) -PromptText ([ref]$null) | Out-Null
 
-        # Overall safety-net timeout: initial prompt wait + per-command read time +
-        # settle delays + post-drain + 15s margin. Under normal operation the process
-        # will have already exited by the time this is reached.
-        $overallTimeoutMs = ($Timeout * 1000) +
-        ($CommandList.Count * $CmdTimeoutSec * 1000) +
-        ($CommandList.Count * $CmdDelayMs) +
-        15000
-        $exited = $proc.WaitForExit($overallTimeoutMs)
+        # Wait for the SSH process to exit. Use a fixed short timeout rather than
+        # one proportional to commands — all commands have already completed at this
+        # point, so only a brief window is needed for the process to close cleanly.
+        $postSessionTimeoutMs = 10000
+        $exited = $proc.WaitForExit($postSessionTimeoutMs)
 
         if (-not $exited) {
+            # All commands completed successfully; the process just didn't exit
+            # cleanly (common with PTY sessions). Kill it — this is not an error.
             $proc.Kill()
-            throw "SSH session timed out after $([math]::Round($overallTimeoutMs / 1000))s (overall timeout)."
+            Write-Verbose "SSH process on $IPAddress did not exit within 10s after session end - killed."
         }
 
         Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
