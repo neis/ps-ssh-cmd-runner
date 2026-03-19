@@ -2,19 +2,23 @@
 
 ## SYNOPSIS
 
-Connects to network devices via native OpenSSH and runs a set of commands, logging all output.
+Connects to network devices via native OpenSSH and runs OS-specific commands, logging all output.
 
 ## DESCRIPTION
 
-Reads a list of device IPs from a text file (one IP per line), prompts for SSH credentials once,
-reads commands from a file, then connects to each device via ssh.exe. Output is logged to
-individual files using the naming convention: `DeviceName_IPAddress_Timestamp.log`.
-The device name is parsed from the SSH prompt (e.g., `Switch01#`, `user@router>`).
+Reads a CSV device list containing IP addresses and operating system types, loads per-OS
+command files from a commands directory, then connects to each device via ssh.exe. Output is
+logged to individual files using the naming convention: `DeviceName_IPAddress_Timestamp.log`.
+The device name is parsed from the SSH prompt (e.g., `Switch01#`, `user@router>`) or from
+command output (e.g., `System Name` for Cisco WLC).
 Failed connections are logged separately for follow-up.
 
 Commands are sent one at a time and the script waits for the device prompt to return before
 sending the next command. This guarantees output is captured in order and no command is sent
 before the previous one has fully completed.
+
+The appropriate paging-disable command (e.g., `terminal length 0`) is sent automatically
+based on the device OS type, so it does not need to be included in command files.
 
 Output is read character-by-character from stdout via a background runspace. This approach
 handles devices (such as Cisco IOS) that send the CLI prompt without a trailing newline, which
@@ -29,21 +33,70 @@ subsequent runs do not re-prompt as long as the stored credentials remain valid.
 - OpenSSH client (`ssh.exe`) available in PATH
   (Windows Optional Feature: _OpenSSH Client_, or Git for Windows)
 
+## QUICK START
+
+1. Create a `devices.txt` CSV file:
+   ```csv
+   IP,OS
+   10.1.1.1,cisco-ios
+   10.1.1.2,cisco-nxos
+   10.1.1.3,cisco-wlc-aireos
+   ```
+
+2. Create a `commands/` directory with per-OS command files:
+   ```
+   commands/cisco-ios.txt
+   commands/cisco-nxos.txt
+   commands/cisco-wlc-aireos.txt
+   ```
+
+3. Run the script:
+   ```powershell
+   .\ssh-cmd-runner.ps1
+   ```
+
+See the `Examples/` directory for sample files.
+
+## SUPPORTED OS TYPES
+
+Each OS type defines automatic behaviors for paging, PTY allocation, and session teardown.
+
+| OS Type | Platform | Paging Command | PTY | Exit Sequence |
+|---------|----------|---------------|-----|---------------|
+| `cisco-ios` | Cisco IOS (Catalyst 2960, etc.) | `terminal length 0` | Auto | `exit` |
+| `cisco-iosxe` | Cisco IOS-XE (Catalyst 3850/9K) | `terminal length 0` | Auto | `exit` |
+| `cisco-nxos` | Cisco NX-OS (Nexus 5K/7K/9K) | `terminal length 0` | Always | `exit` |
+| `cisco-wlc-aireos` | Cisco WLC AireOS (5520, etc.) | `config paging disable` | Always | `logout` then `n` |
+| `cisco-wlc-iosxe` | Cisco WLC IOS-XE (Catalyst 9800) | `terminal length 0` | Auto | `exit` |
+
+**Paging Command** is sent silently after login and does not appear in log output.
+
+**PTY**: "Always" means the script uses `-tt` (forced PTY allocation) for that OS type
+without attempting `-T` first. "Auto" means the script starts with `-T` and auto-detects
+whether PTY is needed (via `stty` error detection or zero-stdout fallback).
+
+**Exit Sequence**: Commands sent to close the remote session cleanly. AireOS requires
+`logout` followed by `n` to decline the save-config prompt (since `config paging disable`
+is treated as a configuration change).
+
 ## CONFIGURATION FILE
 
 All parameters can be set via a `config.json` file placed alongside the script. CLI arguments
 always take precedence over config file values, which take precedence over built-in defaults.
-Copy `[example] config.json` to `config.json` and edit as needed.
+Copy `[example] config.json` from the `Examples/` directory to `config.json` and edit as needed.
 
 ```json
 {
   "DeviceListFile": "./devices.txt",
-  "CommandsFile": "./commands.txt",
+  "CommandsDirectory": "./commands",
   "LogDirectory": "./logs",
   "TimeoutSeconds": 10,
   "ExtraSSHOptions": [],
   "CommandDelayMs": 500,
   "CommandTimeoutSeconds": 30,
+  "InitialPromptTimeoutSeconds": 60,
+  "AllocatePTY": false,
+  "PingTest": true,
   "JsonDirectory": "./json",
   "NetcortexDirectory": "./netcortex",
   "LogEnabled": true,
@@ -61,34 +114,32 @@ Copy `[example] config.json` to `config.json` and edit as needed.
 
 **DeviceListFile** `[string]`
 Path to a CSV file with `IP,OS` columns (header row required). Each row specifies a device
-IP and its operating system type. Supported OS types: `cisco-ios`, `cisco-iosxe`, `cisco-nxos`,
-`cisco-wlc-aireos`, `cisco-wlc-iosxe`. Blank rows and rows where the IP starts with `#` are
-ignored. Default: `.\devices.txt`
+IP and its operating system type. See [Supported OS Types](#supported-os-types) for valid
+values. Blank rows and rows where the IP starts with `#` are ignored. Default: `.\devices.txt`
 
 **CommandsDirectory** `[string]`
 Directory containing per-OS command files. Each file must be named `<os-type>.txt`
 (e.g. `cisco-ios.txt`, `cisco-nxos.txt`) matching the OS column in the device CSV.
-The appropriate paging-disable command is sent automatically before user commands.
-Default: `.\commands`
+Only files for OS types present in the device list are required. Default: `.\commands`
 
 **LogDirectory** `[string]`
 Directory where per-device `.log` files will be saved. Created automatically if it does not
 exist. Default: `.\logs`
 
 **TimeoutSeconds** `[int]`
-SSH connection timeout in seconds applied to the initial handshake. Valid range: 5–120.
+SSH connection timeout in seconds applied to the initial handshake. Valid range: 5-120.
 Default: `10`
 
 **CommandDelayMs** `[int]`
 Delay in milliseconds to wait after receiving the device prompt before sending the next
 command. Useful for slower devices or commands that produce large output where the prompt
-may appear before the output buffer is fully flushed. Valid range: 100–10000. Default: `500`
+may appear before the output buffer is fully flushed. Valid range: 100-10000. Default: `500`
 
 **CommandTimeoutSeconds** `[int]`
 Maximum time in seconds to wait for the device to return its prompt after each command is
 sent. Covers device processing time plus transmission of all output lines. Increase this
 value for commands with large output (e.g. `show interface` on a chassis with many ports).
-Valid range: 5–600. Default: `30`
+Valid range: 5-600. Default: `30`
 
 > Note: `-TimeoutSeconds` controls the initial SSH connection handshake only.
 > `-CommandTimeoutSeconds` governs the per-command wait.
@@ -98,14 +149,14 @@ Maximum time in seconds to wait for the first device prompt after login. This wi
 the full SSH authentication sequence, any MOTD/banner output, and the appearance of the CLI
 prompt. Increase this value for devices that display long banners or authenticate slowly. This
 setting applies only to the initial connection; per-command response waits are governed by
-`CommandTimeoutSeconds`. Valid range: 5–300. Default: `60`
+`CommandTimeoutSeconds`. Valid range: 5-300. Default: `60`
 
 **AllocatePTY** `[bool]`
-Force pseudo-terminal (PTY) allocation using `-tt` instead of `-T`. Required for devices
-whose login sequence depends on a terminal (e.g. appliances that run `stty` during startup).
-When `$false` (default), the script auto-detects `stty` failures and retries with PTY
-automatically. Set to `$true` to skip the failed first attempt for known PTY-dependent
-devices. Default: `$false`
+Force pseudo-terminal (PTY) allocation using `-tt` instead of `-T` for all devices. When
+`$false` (default), PTY allocation is determined per-device: OS types that require PTY
+(`cisco-nxos`, `cisco-wlc-aireos`) always use `-tt`, while other OS types start with `-T`
+and auto-detect PTY failures via `stty` error detection or zero-stdout fallback. Set to
+`$true` to force PTY for all devices regardless of OS type. Default: `$false`
 
 **PingTest** `[bool]`
 Send a single ICMP ping to each device before attempting SSH. Devices that do not respond
@@ -162,16 +213,58 @@ When `$true`, removes the original output directories after the archive is succe
 created. Has no effect if `CompressOutput` is `$false` or if archive creation fails.
 Default: `$false`
 
+## PER-OS COMMAND FILES
+
+Command files live in the `CommandsDirectory` (default: `.\commands`). Each file is named
+after its OS type with a `.txt` extension. Only files for OS types referenced in your device
+CSV are required.
+
+```
+commands/
+  cisco-ios.txt
+  cisco-iosxe.txt
+  cisco-nxos.txt
+  cisco-wlc-aireos.txt
+  cisco-wlc-iosxe.txt
+```
+
+Each file contains one command per line. Blank lines and lines starting with `#` are ignored.
+**Do not include paging-disable commands** (e.g. `terminal length 0`) in these files -- the
+script sends the appropriate paging command automatically based on the OS type.
+
+Example `commands/cisco-ios.txt`:
+```
+# Cisco IOS discovery commands
+show startup-config | include hostname
+show version
+show inventory
+show cdp neighbors detail
+show interface status
+show ip route
+show run
+```
+
+Example `commands/cisco-wlc-aireos.txt`:
+```
+# Cisco WLC AireOS discovery commands
+show sysinfo
+show inventory
+show interface summary
+show wlan summary
+show ap summary
+show run-config
+```
+
 ## OUTPUT FILES
 
 ### Log Files
 
 Each device session produces a `.log` file in `LogDirectory` using the naming convention
-`DeviceName_IPAddress_Timestamp.log`. Each log file contains three sections:
+`DeviceName_IPAddress_Timestamp.log`. Each log file contains:
 
-1. **Header** — device name, IP, user, date, status, and timeout setting.
-2. **Commands Sent** — the full list of commands that were submitted to the device.
-3. **Device Output** — the captured session output.
+1. **Header** -- device name, IP, user, date, status, OS type, timeout settings, and PTY mode.
+2. **Commands Sent** -- the full list of commands submitted to the device.
+3. **Device Output** -- the captured session output.
 
 Within the Device Output section, each command block follows this layout:
 
@@ -188,61 +281,43 @@ The prompt is written alone (without a command) twice between each command block
 every non-blank line is either a prompt, a command echo, or device output, the log is
 straightforward to parse programmatically.
 
+If a command times out, any partial output received before the timeout is preserved in the
+log under the PARTIAL OUTPUT section.
+
 ### JSON Output
 
-When `JsonEnabled` is `$true`, the script writes a timestamped JSON file to `JsonDirectory`
-after all devices have been processed. The filename follows the convention
-`ssh-output-<timestamp>.json`.
+When `JsonEnabled` is `$true`, the script writes a timestamped session summary JSON file
+plus one per-device JSON file to `JsonDirectory`. The session summary includes OS type
+breakdowns:
 
 ```json
 {
   "summary": {
     "platform": "Microsoft Windows 10.0.22631",
-    "engine": "PowerShell 7.5.4",
-    "date": "2026-02-26 15:36:18",
-    "result": { "total": 2, "success": 1, "failed": 1 },
+    "engine": "PowerShell 5.1.22621.4391",
+    "date": "2026-03-19 10:00:00",
+    "result": { "total": 3, "success": 2, "failed": 1 },
     "devices": {
-      "count": 2,
-      "ip_addresses": ["10.1.50.1", "10.1.50.2"],
-      "failed_ip_addresses": ["10.1.50.1"]
-    },
-    "commands": {
       "count": 3,
-      "list": ["term len 0", "show switch", "show inventory"]
+      "ip_addresses": ["10.1.1.1", "10.1.1.2", "10.1.1.3"],
+      "failed_ip_addresses": ["10.1.1.3"]
+    },
+    "commands_directory": "./commands",
+    "os_types": {
+      "cisco-ios": {
+        "device_count": 1,
+        "command_count": 7,
+        "commands": ["show version", "show inventory", "..."]
+      },
+      "cisco-nxos": {
+        "device_count": 2,
+        "command_count": 5,
+        "commands": ["show version", "show inventory", "..."]
+      }
     }
-  },
-  "devices": [
-    {
-      "name": "s3850x-1",
-      "ip": "10.1.50.2",
-      "timestamp": "2026-02-26 15:36:48",
-      "commands": [
-        {
-          "command": "show inventory",
-          "raw_output": [
-            "NAME: \"c38xx Stack\", DESCR: \"c38xx Stack\"",
-            "PID: WS-C3850-48F-L    , VID: V07  , SN: FCW2046F0PD",
-            ""
-          ]
-        }
-      ]
-    }
-  ]
+  }
 }
 ```
-
-Key details:
-
-- Only **successfully connected** devices appear in the `devices` array. Failed devices are
-  listed in `summary.devices.failed_ip_addresses`.
-- Each command's output is stored as **an array of strings** (`raw_output`), one element per
-  output line. Blank lines are preserved as empty strings `""`.
-- **Double-quotes** within device output are automatically escaped as `\"` by
-  `ConvertTo-Json`.
-- `summary.date` reflects the run start time; per-device `timestamp` reflects the completion
-  time of that device's session.
-- `summary.platform` and `summary.engine` are populated dynamically from the host OS and
-  PowerShell version.
 
 ### Netcortex Output
 
@@ -262,7 +337,7 @@ ssh-session-20260303_143000.zip
 ```
 
 The archive is created in the same directory as the script. Only directories that exist **and
-contain at least one file** are included — empty directories are silently skipped.
+contain at least one file** are included -- empty directories are silently skipped.
 
 | Parameter                      | Effect                                                         |
 | ------------------------------ | -------------------------------------------------------------- |
@@ -270,18 +345,6 @@ contain at least one file** are included — empty directories are silently skip
 | `CompressWhen = "Always"`      | Archive regardless of device success/failure                   |
 | `CompressWhen = "SuccessOnly"` | Skip archive if any device failed                              |
 | `DeleteAfterCompress = $true`  | Remove source directories after a confirmed successful archive |
-
-Example — compress and clean up after every run:
-
-```powershell
-.\ssh-cmd-runner.ps1 -CompressOutput $true -DeleteAfterCompress $true
-```
-
-Example — only compress when all devices succeeded:
-
-```powershell
-.\ssh-cmd-runner.ps1 -CompressOutput $true -CompressWhen SuccessOnly
-```
 
 ## WINDOWS CREDENTIAL MANAGER
 
@@ -303,19 +366,41 @@ re-prompting.
 .\ssh-cmd-runner.ps1 -CredentialLabel "SSH-LAB"
 ```
 
+## PTY ALLOCATION AND AUTO-DETECTION
+
+The script supports two modes of SSH terminal allocation:
+
+- **`-T`** (no PTY): Default for most devices. Works well for Cisco IOS/IOS-XE where PTY
+  can cause echo complications.
+- **`-tt`** (forced PTY): Required for devices whose login sequence depends on a terminal,
+  such as NX-OS switches (which run `stty` during login) and AireOS WLCs.
+
+PTY allocation is determined per-device based on OS type. OS types with `RequirePTY = true`
+(`cisco-nxos`, `cisco-wlc-aireos`) always use `-tt`. Other OS types start with `-T` and
+fall back to `-tt` automatically if:
+
+1. **stty error detected** (fast, within 10s): The remote device produces
+   `stty: Inappropriate ioctl for device` in stderr.
+2. **Zero stdout timeout** (after full initial timeout): SSH connected but produced no
+   output at all.
+
+Setting `AllocatePTY = $true` globally forces `-tt` for all devices.
+
+When PTY is active, the script sends `stty -echo` after login to suppress PTY echo, keeping
+command output clean and prompt detection reliable.
+
 ## LEGACY DEVICE SUPPORT
 
 Older network devices often require SSH algorithms that modern OpenSSH clients disable by
 default. There are two ways to supply these settings.
 
-### Option 1 — ExtraSSHOptions parameter
+### Option 1 -- ExtraSSHOptions parameter
 
 Pass the required options directly on the command line or via `config.json`. Each `-o` flag
 and its value must be a separate array element:
 
 ```powershell
-.\ssh-cmd-runner.ps1 -ExtraSSHOptions '-o','MACs=hmac-sha1,hmac-sha1-96',`
-                                       '-o','KexAlgorithms=+diffie-hellman-group1-sha1',`
+.\ssh-cmd-runner.ps1 -ExtraSSHOptions '-o','KexAlgorithms=+diffie-hellman-group1-sha1',`
                                        '-o','HostKeyAlgorithms=+ssh-rsa'
 ```
 
@@ -329,12 +414,11 @@ Or in `config.json`:
 ]
 ```
 
-### Option 2 — SSH config file (recommended for permanent environments)
+### Option 2 -- SSH config file (recommended for permanent environments)
 
 A per-host SSH config file at `~\.ssh\config` (i.e. `C:\Users\<you>\.ssh\config`) is read
 automatically by `ssh.exe` for every connection. Placing legacy settings here removes the
-need to pass `ExtraSSHOptions` at all and keeps the settings in one place regardless of
-which tool initiates the SSH session.
+need to pass `ExtraSSHOptions` at all.
 
 Create or append to `~\.ssh\config`:
 
@@ -349,48 +433,34 @@ Host 10.*
   HostKeyAlgorithms +ssh-rsa
 ```
 
-The `Host 10.*` wildcard matches any IP address beginning with `10.` Use a more specific
-pattern (e.g. `Host 10.1.50.*`) to scope the settings to a particular subnet, or list
-individual IPs with separate `Host` blocks.
-
-| Directive                      | Purpose                                                       |
-| ------------------------------ | ------------------------------------------------------------- |
-| `User`                         | Default SSH username for matched hosts                        |
-| `Port`                         | Default SSH port                                              |
-| `StrictHostKeyChecking no`     | Do not abort when the host key is unknown or changed          |
-| `UserKnownHostsFile /dev/null` | Discard host key checks entirely (lab/legacy use)             |
-| `MACs`                         | Permitted message authentication code algorithms              |
-| `KexAlgorithms`                | Permitted key exchange algorithms                             |
-| `HostKeyAlgorithms +ssh-rsa`   | Re-enable RSA host keys (disabled by default in OpenSSH 8.8+) |
-
-> **Note:** When `Host` directives in `~\.ssh\config` already cover the target devices,
-> `ExtraSSHOptions` can be left empty (`[]`) and the `User` directive can be ignored in
-> favour of the credential prompt.
-
 ## SUPPORTED DEVICE PROMPT FORMATS
 
 The script recognises the following prompt styles when detecting the CLI prompt and
 parsing the device hostname from output:
 
-| Vendor / OS        | Example prompt                          |
-| ------------------ | --------------------------------------- |
-| Cisco IOS / IOS-XE | `hostname#` `hostname>`                 |
-| Cisco NX-OS        | `hostname#` `hostname(config)#`         |
-| Arista EOS         | `hostname#` `hostname>`                 |
-| Juniper JunOS      | `user@hostname>` `user@hostname#`       |
-| Palo Alto PAN-OS   | `user@hostname>` `user@hostname#`       |
-| HP / Aruba         | `hostname#` `hostname>`                 |
-| Linux-based NOS    | `user@hostname:~$` `[user@hostname ~]$` |
+| Vendor / OS            | Example prompt                          |
+| ---------------------- | --------------------------------------- |
+| Cisco IOS / IOS-XE     | `hostname#` `hostname>`                 |
+| Cisco NX-OS            | `hostname#` `hostname(config)#`         |
+| Cisco WLC AireOS       | `(Cisco Controller) >`                  |
+| Arista EOS             | `hostname#` `hostname>`                 |
+| Juniper JunOS          | `user@hostname>` `user@hostname#`       |
+| Palo Alto PAN-OS       | `user@hostname>` `user@hostname#`       |
+| HP / Aruba             | `hostname#` `hostname>`                 |
+| Linux-based NOS        | `user@hostname:~$` `[user@hostname ~]$` |
+
+For Cisco WLC AireOS, the hostname is extracted from the `System Name` field in
+`show sysinfo` output, since the WLC prompt does not contain the hostname.
 
 ## EXAMPLES
 
-Run with all defaults:
+Run with all defaults (devices.txt CSV + commands/ directory in current folder):
 
     .\ssh-cmd-runner.ps1
 
-Specify device list and commands file explicitly:
+Specify a custom device list and commands directory:
 
-    .\ssh-cmd-runner.ps1 -DeviceListFile .\devices.txt -CommandsFile .\commands.txt
+    .\ssh-cmd-runner.ps1 -DeviceListFile .\my-devices.csv -CommandsDirectory .\my-commands
 
 Write logs to a custom directory with a longer connection timeout:
 
@@ -398,11 +468,15 @@ Write logs to a custom directory with a longer connection timeout:
 
 Increase the per-command timeout for devices with verbose output:
 
-    .\ssh-cmd-runner.ps1 -CommandTimeoutSeconds 60
+    .\ssh-cmd-runner.ps1 -CommandTimeoutSeconds 120
 
-Add a 1-second delay between commands for slower devices:
+Force PTY allocation for all devices (overrides per-OS defaults):
 
-    .\ssh-cmd-runner.ps1 -CommandDelayMs 1000
+    .\ssh-cmd-runner.ps1 -AllocatePTY $true
+
+Disable the pre-connection ping test (for networks that block ICMP):
+
+    .\ssh-cmd-runner.ps1 -PingTest $false
 
 Enable JSON and Netcortex output in addition to log files:
 
@@ -419,7 +493,3 @@ Compress all output directories into a zip archive after the run:
 Compress and remove source directories, but only if all devices succeeded:
 
     .\ssh-cmd-runner.ps1 -CompressOutput $true -CompressWhen SuccessOnly -DeleteAfterCompress $true
-
-Connect to legacy devices using ExtraSSHOptions:
-
-    .\ssh-cmd-runner.ps1 -ExtraSSHOptions '-o','KexAlgorithms=+diffie-hellman-group1-sha1','-o','HostKeyAlgorithms=+ssh-rsa'
