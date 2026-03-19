@@ -278,17 +278,6 @@ $psEngine = "PowerShell $($PSVersionTable.PSVersion.ToString())"
 $separator = ("=" * 59)
 $thinSep = ("-" * 40)
 
-# ---------------------------------------------
-# COMPRESS-ONLY MODE — archive existing output and exit
-# ---------------------------------------------
-if ($CompressOnly) {
-    Write-Host ""
-    Write-Host "Compress-only mode - archiving existing output directories." -ForegroundColor Cyan
-    Invoke-CompressOutput -OutputDirectories @($LogDirectory, $JsonDirectory, $NetcortexDirectory) -Cleanup $DeleteAfterCompress
-    Write-Host ""
-    exit 0
-}
-
 # Valid OS types and their session behaviors.
 # PagingCommand  : sent silently after login to disable output paging
 # RequirePTY     : force PTY allocation (-tt) for this OS (overrides AllocatePTY)
@@ -301,19 +290,21 @@ $validOSTypes = @{
     'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';    RequirePTY = $false; ExitCommands = @('exit') }
 }
 
-# Validate input files exist
-if (-not (Test-Path $DeviceListFile -PathType Leaf)) {
+# Validate input files exist (skip when only compressing)
+if (-not $CompressOnly -and -not (Test-Path $DeviceListFile -PathType Leaf)) {
     Write-Error "Device list file not found: '$DeviceListFile'"
     exit 1
 }
 
-# Verify ssh.exe is available
-$sshPath = Get-Command ssh.exe -ErrorAction SilentlyContinue
-if (-not $sshPath) {
-    Write-Error "ssh.exe not found in PATH. Install OpenSSH client (Windows Optional Feature) and retry."
-    exit 1
+# Verify ssh.exe is available (skip when only compressing)
+if (-not $CompressOnly) {
+    $sshPath = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if (-not $sshPath) {
+        Write-Error "ssh.exe not found in PATH. Install OpenSSH client (Windows Optional Feature) and retry."
+        exit 1
+    }
+    Write-Verbose "Using SSH client: $($sshPath.Source)"
 }
-Write-Verbose "Using SSH client: $($sshPath.Source)"
 
 # Create log directory
 if ($LogEnabled -and -not (Test-Path $LogDirectory)) {
@@ -330,62 +321,65 @@ if ($NetcortexEnabled -and -not (Test-Path $NetcortexDirectory)) {
     New-Item -ItemType Directory -Path $NetcortexDirectory -Force | Out-Null
 }
 
-# Read device CSV (IP,OS columns with header row)
-$devicesCsv = Import-Csv $DeviceListFile
-if ($devicesCsv.Count -eq 0) {
-    Write-Error "No devices found in '$DeviceListFile'."
-    exit 1
-}
-
-# Validate required columns
-$csvColumns = $devicesCsv[0].PSObject.Properties.Name
-if ('IP' -notin $csvColumns -or 'OS' -notin $csvColumns) {
-    Write-Error "Device CSV must have 'IP' and 'OS' columns. Found: $($csvColumns -join ', ')"
-    exit 1
-}
-
-# Validate OS values and filter blanks/comments
-$devices = @()
-foreach ($row in $devicesCsv) {
-    $ip = $row.IP.Trim()
-    $os = $row.OS.Trim().ToLower()
-    if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
-    if ($os -notin $validOSTypes.Keys) {
-        Write-Error "Unknown OS type '$os' for device $ip. Valid: $($validOSTypes.Keys -join ', ')"
+# Skip device and command loading when only compressing
+if (-not $CompressOnly) {
+    # Read device CSV (IP,OS columns with header row)
+    $devicesCsv = Import-Csv $DeviceListFile
+    if ($devicesCsv.Count -eq 0) {
+        Write-Error "No devices found in '$DeviceListFile'."
         exit 1
     }
-    $devices += [PSCustomObject]@{ IP = $ip; OS = $os }
-}
 
-if ($devices.Count -eq 0) {
-    Write-Error "No valid devices found in '$DeviceListFile'."
-    exit 1
-}
-
-# Validate commands directory exists
-if (-not (Test-Path $CommandsDirectory -PathType Container)) {
-    Write-Error "Commands directory not found: '$CommandsDirectory'"
-    exit 1
-}
-
-# Load per-OS command files for each OS type referenced in the device list
-$uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
-$commandsByOS = @{}
-
-foreach ($osType in $uniqueOSTypes) {
-    $cmdFile = Join-Path $CommandsDirectory "$osType.txt"
-    if (-not (Test-Path $cmdFile -PathType Leaf)) {
-        Write-Error "Command file not found for OS '$osType': '$cmdFile'"
+    # Validate required columns
+    $csvColumns = $devicesCsv[0].PSObject.Properties.Name
+    if ('IP' -notin $csvColumns -or 'OS' -notin $csvColumns) {
+        Write-Error "Device CSV must have 'IP' and 'OS' columns. Found: $($csvColumns -join ', ')"
         exit 1
     }
-    $cmds = Get-Content $cmdFile |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
-    if ($cmds.Count -eq 0) {
-        Write-Error "No valid commands found in '$cmdFile'."
+
+    # Validate OS values and filter blanks/comments
+    $devices = @()
+    foreach ($row in $devicesCsv) {
+        $ip = $row.IP.Trim()
+        $os = $row.OS.Trim().ToLower()
+        if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
+        if ($os -notin $validOSTypes.Keys) {
+            Write-Error "Unknown OS type '$os' for device $ip. Valid: $($validOSTypes.Keys -join ', ')"
+            exit 1
+        }
+        $devices += [PSCustomObject]@{ IP = $ip; OS = $os }
+    }
+
+    if ($devices.Count -eq 0) {
+        Write-Error "No valid devices found in '$DeviceListFile'."
         exit 1
     }
-    $commandsByOS[$osType] = $cmds
+
+    # Validate commands directory exists
+    if (-not (Test-Path $CommandsDirectory -PathType Container)) {
+        Write-Error "Commands directory not found: '$CommandsDirectory'"
+        exit 1
+    }
+
+    # Load per-OS command files for each OS type referenced in the device list
+    $uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
+    $commandsByOS = @{}
+
+    foreach ($osType in $uniqueOSTypes) {
+        $cmdFile = Join-Path $CommandsDirectory "$osType.txt"
+        if (-not (Test-Path $cmdFile -PathType Leaf)) {
+            Write-Error "Command file not found for OS '$osType': '$cmdFile'"
+            exit 1
+        }
+        $cmds = Get-Content $cmdFile |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
+        if ($cmds.Count -eq 0) {
+            Write-Error "No valid commands found in '$cmdFile'."
+            exit 1
+        }
+        $commandsByOS[$osType] = $cmds
+    }
 }
 
 # ---------------------------------------------
@@ -517,12 +511,13 @@ function Set-AskPassScript {
 }
 
 # ---------------------------------------------
-# CREDENTIAL MANAGEMENT
+# CREDENTIAL MANAGEMENT (skip when only compressing)
 # Precedence: Windows Credential Manager > interactive prompt.
 # Credentials are written to Credential Manager only after a successful
 # device connection confirms they work. ClearCredentials forces a fresh
 # prompt and removes any stored entry before looking up new ones.
 # ---------------------------------------------
+if (-not $CompressOnly) {
 Write-Host ""
 
 if ($ClearCredentials) {
@@ -561,6 +556,7 @@ $askPassDir    = Join-Path $env:TEMP "ssh_askpass_$timestamp"
 New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
 $askPassScript = Join-Path $askPassDir "askpass.cmd"
 Set-AskPassScript -ScriptPath $askPassScript -Password $password
+}   # end if (-not $CompressOnly) — credential management
 
 # ---------------------------------------------
 # HELPER FUNCTION: Parse device hostname from SSH output
@@ -1268,6 +1264,18 @@ function Invoke-SSHSession {
     $result.Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
     return $result
+}
+
+# ---------------------------------------------
+# COMPRESS-ONLY MODE — archive existing output and exit
+# Placed after function definitions so Invoke-CompressOutput is available.
+# ---------------------------------------------
+if ($CompressOnly) {
+    Write-Host ""
+    Write-Host "Compress-only mode - archiving existing output directories." -ForegroundColor Cyan
+    Invoke-CompressOutput -OutputDirectories @($LogDirectory, $JsonDirectory, $NetcortexDirectory) -Cleanup $DeleteAfterCompress
+    Write-Host ""
+    exit 0
 }
 
 # ---------------------------------------------
