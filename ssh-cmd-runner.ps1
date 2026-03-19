@@ -270,13 +270,16 @@ $psEngine = "PowerShell $($PSVersionTable.PSVersion.ToString())"
 $separator = ("=" * 59)
 $thinSep = ("-" * 40)
 
-# Valid OS types and their paging-disable commands (sent silently before user commands)
+# Valid OS types and their session behaviors.
+# PagingCommand  : sent silently after login to disable output paging
+# RequirePTY     : force PTY allocation (-tt) for this OS (overrides AllocatePTY)
+# ExitCommands   : sequence sent to close the session cleanly (e.g. "logout" then "n" for save prompt)
 $validOSTypes = @{
-    'cisco-ios'        = 'terminal length 0'
-    'cisco-iosxe'      = 'terminal length 0'
-    'cisco-nxos'       = 'terminal length 0'
-    'cisco-wlc-aireos' = 'config paging disable'
-    'cisco-wlc-iosxe'  = 'terminal length 0'
+    'cisco-ios'        = @{ PagingCommand = 'terminal length 0';    RequirePTY = $false; ExitCommands = @('exit') }
+    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';    RequirePTY = $false; ExitCommands = @('exit') }
+    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';    RequirePTY = $true;  ExitCommands = @('exit') }
+    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n') }
+    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';    RequirePTY = $false; ExitCommands = @('exit') }
 }
 
 # Validate input files exist
@@ -654,6 +657,7 @@ function Invoke-SSHSession {
         [int]$InitialCmdTimeoutSec = 60,
         [bool]$AllocatePTY = $false,
         [string[]]$PagingCommands = @(),
+        [string[]]$ExitCommands = @('exit'),
         [string]$OSType = ""
     )
 
@@ -956,11 +960,15 @@ function Invoke-SSHSession {
         if ($lastPrompt -ne "") { $stdOutBuilder.AppendLine($lastPrompt) | Out-Null }
 
         # With PTY (-tt), closing stdin does NOT cause the remote session to end —
-        # the PTY keeps the shell alive indefinitely. Send "exit" to cleanly close
-        # the remote CLI session before closing stdin.
-        if ($usePTY) {
-            $proc.StandardInput.WriteLine("exit")
-            $proc.StandardInput.Flush()
+        # the PTY keeps the shell alive indefinitely. Send the OS-specific exit
+        # sequence to cleanly close the remote CLI session before closing stdin.
+        # For AireOS WLC: "logout" then "n" (decline save-config prompt).
+        if ($usePTY -and $ExitCommands.Count -gt 0) {
+            foreach ($exitCmd in $ExitCommands) {
+                $proc.StandardInput.WriteLine($exitCmd)
+                $proc.StandardInput.Flush()
+                Start-Sleep -Milliseconds 500
+            }
         }
         $proc.StandardInput.Close()
 
@@ -1229,9 +1237,12 @@ foreach ($device in $devices) {
     $os = $device.OS
     Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ($os) ... " -NoNewline
 
-    # Look up commands and paging for this device's OS
+    # Look up commands, paging, PTY, and exit sequence for this device's OS
     $commands = $commandsByOS[$os]
-    $pagingCmds = @($validOSTypes[$os])
+    $osProfile = $validOSTypes[$os]
+    $pagingCmds = @($osProfile.PagingCommand)
+    $exitCmds = $osProfile.ExitCommands
+    $devicePTY = $AllocatePTY -or $osProfile.RequirePTY
 
     # Pre-connection ping test: skip unreachable devices immediately.
     if ($PingTest) {
@@ -1265,8 +1276,9 @@ foreach ($device in $devices) {
             -CmdDelayMs            $CommandDelayMs `
             -CmdTimeoutSec         $CommandTimeoutSeconds `
             -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds `
-            -AllocatePTY           $AllocatePTY `
+            -AllocatePTY           $devicePTY `
             -PagingCommands        $pagingCmds `
+            -ExitCommands          $exitCmds `
             -OSType                $os
 
         if ($sessionResult.AuthFailed) {
