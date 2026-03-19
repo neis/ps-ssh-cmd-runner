@@ -47,6 +47,13 @@
     authenticate slowly. Applies only to the initial connection wait; per-command waits
     are governed by CommandTimeoutSeconds. Valid range: 5-300. Default is 60.
 
+.PARAMETER AllocatePTY
+    Force pseudo-terminal (PTY) allocation by using -tt instead of -T when
+    launching ssh.exe. Required for devices whose login sequence depends on a
+    terminal (e.g. devices that run stty during startup). When $false (default),
+    the script auto-detects stty failures and retries with PTY automatically.
+    Set to $true to skip the failed first attempt for known PTY-dependent devices.
+
 .PARAMETER JsonDirectory
     Directory where JSON output files will be saved. Created automatically if it doesn't exist.
     Each run produces a timestamped session summary (ssh-session-<timestamp>.json) plus one
@@ -155,6 +162,9 @@ param(
     [ValidateRange(5, 300)]
     [int]$InitialPromptTimeoutSeconds = 60,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Force PTY allocation (-tt) for devices requiring a terminal (default: false, auto-detects)")]
+    [bool]$AllocatePTY = $false,
+
     [Parameter(Mandatory = $false, HelpMessage = "Directory where the JSON output file will be saved. Created automatically if it doesn't exist.")]
     [string]$JsonDirectory = ".\json",
 
@@ -205,6 +215,7 @@ if (Test-Path $configPath -PathType Leaf) {
     $requiredKeys = @(
         'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
         'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds', 'InitialPromptTimeoutSeconds',
+        'AllocatePTY',
         'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled',
         'CredentialLabel', 'ClearCredentials',
         'CompressOutput', 'CompressWhen', 'DeleteAfterCompress'
@@ -223,6 +234,7 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('CommandDelayMs'))        { $CommandDelayMs        = [int]$config.CommandDelayMs }
     if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds'))        { $CommandTimeoutSeconds        = [int]$config.CommandTimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('InitialPromptTimeoutSeconds')) { $InitialPromptTimeoutSeconds = [int]$config.InitialPromptTimeoutSeconds }
+    if (-not $PSBoundParameters.ContainsKey('AllocatePTY'))              { $AllocatePTY              = [bool]$config.AllocatePTY }
     if (-not $PSBoundParameters.ContainsKey('JsonDirectory'))         { $JsonDirectory         = $config.JsonDirectory }
     if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory'))        { $NetcortexDirectory        = $config.NetcortexDirectory }
     if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
@@ -576,7 +588,8 @@ function Invoke-SSHSession {
         [string[]]$SSHOptions = @(),
         [int]$CmdDelayMs = 500,
         [int]$CmdTimeoutSec = 30,
-        [int]$InitialCmdTimeoutSec = 60
+        [int]$InitialCmdTimeoutSec = 60,
+        [bool]$AllocatePTY = $false
     )
 
     $result = [PSCustomObject]@{
@@ -592,12 +605,22 @@ function Invoke-SSHSession {
     }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $usePTY = $AllocatePTY
+
+    # Retry loop: first attempt uses -T (unless AllocatePTY is true). If a stty error is
+    # detected in stderr, the second attempt automatically retries with -tt (PTY allocated).
+    for ($ptyAttempt = 0; $ptyAttempt -lt 2; $ptyAttempt++) {
+    $proc = $null
+    $readerRunspace = $null
+    $errEvent = $null
+    $stdOutBuilder = $null
+    $stdErrBuilder = $null
 
     try {
         # Build ssh arguments
         $sshArgs = @(
             "-v",
-            "-T",
+            $(if ($usePTY) { "-tt" } else { "-T" }),
             "-o", "ConnectTimeout=$Timeout",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
@@ -709,12 +732,38 @@ function Invoke-SSHSession {
 
         # Wait for the initial device prompt before sending any commands.
         # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
-        # $initialTimeoutMs uses InitialCmdTimeoutSec (independent of per-command timeout).
-        # $perCmdTimeoutMs is declared here and reused for all subsequent command waits.
         $initialTimeoutMs = $InitialCmdTimeoutSec * 1000
         $perCmdTimeoutMs  = $CmdTimeoutSec * 1000
         $lastPrompt = ""
-        if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $initialTimeoutMs -PromptText ([ref]$lastPrompt))) {
+        $promptFound = $false
+
+        if (-not $usePTY -and $ptyAttempt -eq 0) {
+            # Phase 1: Quick check (up to 10s) — enough for stty error to appear in stderr.
+            # If the prompt arrives quickly, we proceed immediately.
+            $quickMs = [Math]::Min(10000, $initialTimeoutMs)
+            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $quickMs -PromptText ([ref]$lastPrompt)
+
+            if (-not $promptFound) {
+                # Check stderr for stty failure — indicates device requires PTY allocation.
+                if ($stdErrBuilder.ToString() -match "stty.*Inappropriate ioctl") {
+                    Write-Verbose "stty error detected on $IPAddress — retrying with PTY allocation (-tt)"
+                    $usePTY = $true
+                    continue   # finally cleans up this attempt, loop retries with -tt
+                }
+
+                # No stty error — continue waiting for the remaining initial timeout.
+                $remainingMs = $initialTimeoutMs - $quickMs
+                if ($remainingMs -gt 0) {
+                    $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt)
+                }
+            }
+        }
+        else {
+            # AllocatePTY is true (or this is a PTY retry): use the full initial timeout.
+            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $initialTimeoutMs -PromptText ([ref]$lastPrompt)
+        }
+
+        if (-not $promptFound) {
             if (-not $proc.HasExited) { $proc.Kill() }
             throw "Timed out waiting for initial device prompt after ${InitialCmdTimeoutSec}s. Consider increasing -InitialPromptTimeoutSeconds."
         }
@@ -740,6 +789,19 @@ function Invoke-SSHSession {
         }
         # If hostname extraction failed, $promptRegex and $regexHolder[0] remain the
         # broad patterns — behaviour is identical to before, which is the correct fallback.
+
+        # When PTY is allocated, the remote terminal has echo enabled by default.
+        # Suppress it now so subsequent commands don't echo back through the PTY,
+        # which would confuse prompt detection and pollute captured output.
+        if ($usePTY) {
+            $proc.StandardInput.WriteLine("stty -echo 2>/dev/null")
+            $proc.StandardInput.Flush()
+            $sttyDrain = [System.Text.StringBuilder]::new()
+            # Drain the echoed prompt prefix that the PTY sends back
+            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 5000 -PromptText ([ref]$null) | Out-Null
+            # Drain the stty command text echo and wait for the real prompt
+            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 5000 -PromptText ([ref]$lastPrompt) | Out-Null
+        }
 
         # Send each command and wait for the resulting prompt before proceeding.
         # This guarantees all output from a command is collected before the next
@@ -874,6 +936,7 @@ function Invoke-SSHSession {
             " Status    : $($result.Status)"
             " Conn Tmout: ${Timeout}s"
             " Cmd Tmout : ${CmdTimeoutSec}s"
+            " PTY      : $(if ($usePTY) { 'Yes (-tt)' } else { 'No (-T)' })"
             $separator
             ""
             "$thinSep COMMANDS SENT $thinSep"
@@ -892,6 +955,8 @@ function Invoke-SSHSession {
         if ($LogEnabled) {
             Set-Content -Path $logFilePath -Value ($logLines -join "`r`n") -Encoding UTF8
         }
+
+        break   # Success — exit the PTY retry loop
     }
     catch {
         $result.Status     = "Failed"
@@ -928,6 +993,7 @@ function Invoke-SSHSession {
             " Status    : FAILED"
             " Conn Tmout: ${Timeout}s"
             " Cmd Tmout : ${CmdTimeoutSec}s"
+            " PTY      : $(if ($usePTY) { 'Yes (-tt)' } else { 'No (-T)' })"
             $separator
             ""
             "ERROR: $($result.Error)"
@@ -950,11 +1016,18 @@ function Invoke-SSHSession {
         if ($LogEnabled) {
             Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
         }
+
+        break   # Error handled — exit the PTY retry loop
     }
     finally {
-        $sw.Stop()
-        $result.Duration = $sw.Elapsed
-        $result.Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        # Per-iteration cleanup: release process, event, and runspace resources.
+        # On a stty-triggered retry (continue), this runs before the next iteration.
+        try {
+            if ($null -ne $errEvent) {
+                Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+            }
+        }
+        catch {}
 
         try {
             if ($null -ne $proc) {
@@ -973,6 +1046,11 @@ function Invoke-SSHSession {
             Write-Verbose "Reader runspace cleanup for $IPAddress : $($_.Exception.Message)"
         }
     }
+    }   # end of PTY retry loop
+
+    $sw.Stop()
+    $result.Duration = $sw.Elapsed
+    $result.Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
     return $result
 }
@@ -985,6 +1063,8 @@ $cmdCountStr = "$($commands.Count)".PadRight(37)
 $timeoutStr    = "${TimeoutSeconds}s".PadRight(37)
 $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
 $iniTimeoutStr = "${InitialPromptTimeoutSeconds}s".PadRight(37)
+$ptyStr = if ($AllocatePTY) { "Enabled (-tt)" } else { "Auto (-T, fallback -tt)" }
+$ptyStr = $ptyStr.PadRight(37)
 $credLabelStr = $CredentialLabel
 if ($credLabelStr.Length -gt 37) { $credLabelStr = $credLabelStr.Substring(0, 34) + "..." }
 $credLabelStr = $credLabelStr.PadRight(37)
@@ -1016,6 +1096,7 @@ Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Ini Tmout: ${iniTimeoutStr}|" -ForegroundColor Gray
+Write-Host "|  PTY Mode : ${ptyStr}|" -ForegroundColor Gray
 Write-Host "|  SSH Creds: ${credLabelStr}|" -ForegroundColor Gray
 Write-Host "|  Compress : ${compressStr}|" -ForegroundColor Gray
 Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
@@ -1050,7 +1131,8 @@ foreach ($ip in $devices) {
             -SSHOptions            $ExtraSSHOptions `
             -CmdDelayMs            $CommandDelayMs `
             -CmdTimeoutSec         $CommandTimeoutSeconds `
-            -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds
+            -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds `
+            -AllocatePTY           $AllocatePTY
 
         if ($sessionResult.AuthFailed) {
             $authRetryCount++

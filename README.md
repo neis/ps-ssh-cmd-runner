@@ -96,6 +96,13 @@ prompt. Increase this value for devices that display long banners or authenticat
 setting applies only to the initial connection; per-command response waits are governed by
 `CommandTimeoutSeconds`. Valid range: 5–300. Default: `60`
 
+**AllocatePTY** `[bool]`
+Force pseudo-terminal (PTY) allocation using `-tt` instead of `-T`. Required for devices
+whose login sequence depends on a terminal (e.g. appliances that run `stty` during startup).
+When `$false` (default), the script auto-detects `stty` failures and retries with PTY
+automatically. Set to `$true` to skip the failed first attempt for known PTY-dependent
+devices. Default: `$false`
+
 **ExtraSSHOptions** `[string[]]`
 Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly
 used for legacy devices that require older key exchange or cipher algorithms. See

@@ -1,0 +1,21 @@
+{
+    "DeviceListFile": "./devices.txt",
+    "CommandsFile": "./commands.txt",
+    "LogDirectory": "./logs",
+    "TimeoutSeconds": 10,
+    "ExtraSSHOptions": [],
+    "CommandDelayMs": 500,
+    "CommandTimeoutSeconds": 30,
+    "InitialPromptTimeoutSeconds": 60,
+    "AllocatePTY": false,
+    "JsonDirectory": "./json",
+    "NetcortexDirectory": "./netcortex",
+    "LogEnabled": true,
+    "JsonEnabled": false,
+    "NetcortexEnabled": false,
+    "CredentialLabel": "SSH-CMD-Runner",
+    "ClearCredentials": false,
+    "CompressOutput": false,
+    "CompressWhen": "Always",
+    "DeleteAfterCompress": false
+}
