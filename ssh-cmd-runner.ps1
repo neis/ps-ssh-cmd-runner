@@ -408,9 +408,8 @@ if (-not $CompressOnly) {
             Write-Host ""
             Write-Host "  [S] Skip all cisco-wlc-aireos devices and continue" -ForegroundColor Cyan
             Write-Host "  [A] Abort the run" -ForegroundColor Cyan
-            Write-Host "  [C] Continue anyway (hostnames will be 'unknown')" -ForegroundColor Cyan
             Write-Host ""
-            $response = (Read-Host "  Choice (S/A/C)").ToUpper()
+            $response = (Read-Host "  Choice (S/A)").ToUpper()
             if ($response -eq 'S') {
                 Write-Host "  Skipping all cisco-wlc-aireos devices." -ForegroundColor Yellow
                 $devices = @($devices | Where-Object { $_.OS -ne 'cisco-wlc-aireos' })
@@ -419,11 +418,9 @@ if (-not $CompressOnly) {
                     Write-Host "  No devices remaining after skipping. Exiting." -ForegroundColor Red
                     exit 0
                 }
-            } elseif ($response -eq 'A') {
+            } else {
                 Write-Host "  Run aborted." -ForegroundColor Red
                 exit 1
-            } else {
-                Write-Host "  Continuing - cisco-wlc-aireos devices will use 'unknown' as hostname." -ForegroundColor Yellow
             }
         }
     }
