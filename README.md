@@ -60,12 +60,16 @@ Copy `[example] config.json` to `config.json` and edit as needed.
 ## PARAMETERS
 
 **DeviceListFile** `[string]`
-Path to a text file containing one IP address per line. Blank lines and lines beginning
-with `#` are ignored. Default: `.\devices.txt`
+Path to a CSV file with `IP,OS` columns (header row required). Each row specifies a device
+IP and its operating system type. Supported OS types: `cisco-ios`, `cisco-iosxe`, `cisco-nxos`,
+`cisco-wlc-aireos`, `cisco-wlc-iosxe`. Blank rows and rows where the IP starts with `#` are
+ignored. Default: `.\devices.txt`
 
-**CommandsFile** `[string]`
-Path to a text file containing one command per line to execute on each device. Blank lines
-and lines beginning with `#` are ignored. Default: `.\commands.txt`
+**CommandsDirectory** `[string]`
+Directory containing per-OS command files. Each file must be named `<os-type>.txt`
+(e.g. `cisco-ios.txt`, `cisco-nxos.txt`) matching the OS column in the device CSV.
+The appropriate paging-disable command is sent automatically before user commands.
+Default: `.\commands`
 
 **LogDirectory** `[string]`
 Directory where per-device `.log` files will be saved. Created automatically if it does not

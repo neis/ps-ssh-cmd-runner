@@ -1,6 +1,6 @@
 {
     "DeviceListFile": "./devices.txt",
-    "CommandsFile": "./commands.txt",
+    "CommandsDirectory": "./commands",
     "LogDirectory": "./logs",
     "TimeoutSeconds": 10,
     "ExtraSSHOptions": [],

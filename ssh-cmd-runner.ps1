@@ -14,8 +14,10 @@
 .PARAMETER DeviceListFile
     Path to a text file containing one IP address per line. Blank lines and comments (#) are ignored.
 
-.PARAMETER CommandsFile
-    Path to a text file containing one command per line to execute on each device.
+.PARAMETER CommandsDirectory
+    Directory containing per-OS command files. Each file must be named
+    <os-type>.txt (e.g. cisco-ios.txt, cisco-nxos.txt) matching the OS
+    column in the device CSV. Default is .\commands.
 
 .PARAMETER LogDirectory
     Directory where output logs will be saved. Created automatically if it doesn't exist.
@@ -143,8 +145,8 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Path to file with one IP per line")]
     [string]$DeviceListFile = ".\devices.txt",
 
-    [Parameter(Mandatory = $false, HelpMessage = "Path to file with one command per line")]
-    [string]$CommandsFile = ".\commands.txt",
+    [Parameter(Mandatory = $false, HelpMessage = "Directory with per-OS command files (default: .\commands)")]
+    [string]$CommandsDirectory = ".\commands",
 
     [Parameter(Mandatory = $false)]
     [string]$LogDirectory = ".\logs",
@@ -222,7 +224,7 @@ if (Test-Path $configPath -PathType Leaf) {
     }
 
     $requiredKeys = @(
-        'DeviceListFile', 'CommandsFile', 'LogDirectory', 'TimeoutSeconds',
+        'DeviceListFile', 'CommandsDirectory', 'LogDirectory', 'TimeoutSeconds',
         'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds', 'InitialPromptTimeoutSeconds',
         'AllocatePTY', 'PingTest',
         'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled',
@@ -236,7 +238,7 @@ if (Test-Path $configPath -PathType Leaf) {
     }
 
     if (-not $PSBoundParameters.ContainsKey('DeviceListFile'))        { $DeviceListFile        = $config.DeviceListFile }
-    if (-not $PSBoundParameters.ContainsKey('CommandsFile'))          { $CommandsFile          = $config.CommandsFile }
+    if (-not $PSBoundParameters.ContainsKey('CommandsDirectory'))     { $CommandsDirectory     = $config.CommandsDirectory }
     if (-not $PSBoundParameters.ContainsKey('LogDirectory'))          { $LogDirectory          = $config.LogDirectory }
     if (-not $PSBoundParameters.ContainsKey('TimeoutSeconds'))        { $TimeoutSeconds        = [int]$config.TimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('ExtraSSHOptions'))       { $ExtraSSHOptions       = [string[]]$config.ExtraSSHOptions }
@@ -268,13 +270,18 @@ $psEngine = "PowerShell $($PSVersionTable.PSVersion.ToString())"
 $separator = ("=" * 59)
 $thinSep = ("-" * 40)
 
+# Valid OS types and their paging-disable commands (sent silently before user commands)
+$validOSTypes = @{
+    'cisco-ios'        = 'terminal length 0'
+    'cisco-iosxe'      = 'terminal length 0'
+    'cisco-nxos'       = 'terminal length 0'
+    'cisco-wlc-aireos' = 'config paging disable'
+    'cisco-wlc-iosxe'  = 'terminal length 0'
+}
+
 # Validate input files exist
 if (-not (Test-Path $DeviceListFile -PathType Leaf)) {
     Write-Error "Device list file not found: '$DeviceListFile'"
-    exit 1
-}
-if (-not (Test-Path $CommandsFile -PathType Leaf)) {
-    Write-Error "Commands file not found: '$CommandsFile'"
     exit 1
 }
 
@@ -301,24 +308,62 @@ if ($NetcortexEnabled -and -not (Test-Path $NetcortexDirectory)) {
     New-Item -ItemType Directory -Path $NetcortexDirectory -Force | Out-Null
 }
 
-# Read and validate device list (skip blanks and comments)
-$devices = Get-Content $DeviceListFile |
-ForEach-Object { $_.Trim() } |
-Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
-
-if ($devices.Count -eq 0) {
-    Write-Error "No device IPs found in '$DeviceListFile'."
+# Read device CSV (IP,OS columns with header row)
+$devicesCsv = Import-Csv $DeviceListFile
+if ($devicesCsv.Count -eq 0) {
+    Write-Error "No devices found in '$DeviceListFile'."
     exit 1
 }
 
-# Read commands
-$commands = Get-Content $CommandsFile |
-ForEach-Object { $_.Trim() } |
-Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
-
-if ($commands.Count -eq 0) {
-    Write-Error "No valid commands found in '$CommandsFile'."
+# Validate required columns
+$csvColumns = $devicesCsv[0].PSObject.Properties.Name
+if ('IP' -notin $csvColumns -or 'OS' -notin $csvColumns) {
+    Write-Error "Device CSV must have 'IP' and 'OS' columns. Found: $($csvColumns -join ', ')"
     exit 1
+}
+
+# Validate OS values and filter blanks/comments
+$devices = @()
+foreach ($row in $devicesCsv) {
+    $ip = $row.IP.Trim()
+    $os = $row.OS.Trim().ToLower()
+    if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
+    if ($os -notin $validOSTypes.Keys) {
+        Write-Error "Unknown OS type '$os' for device $ip. Valid: $($validOSTypes.Keys -join ', ')"
+        exit 1
+    }
+    $devices += [PSCustomObject]@{ IP = $ip; OS = $os }
+}
+
+if ($devices.Count -eq 0) {
+    Write-Error "No valid devices found in '$DeviceListFile'."
+    exit 1
+}
+
+# Validate commands directory exists
+if (-not (Test-Path $CommandsDirectory -PathType Container)) {
+    Write-Error "Commands directory not found: '$CommandsDirectory'"
+    exit 1
+}
+
+# Load per-OS command files for each OS type referenced in the device list
+$uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
+$commandsByOS = @{}
+
+foreach ($osType in $uniqueOSTypes) {
+    $cmdFile = Join-Path $CommandsDirectory "$osType.txt"
+    if (-not (Test-Path $cmdFile -PathType Leaf)) {
+        Write-Error "Command file not found for OS '$osType': '$cmdFile'"
+        exit 1
+    }
+    $cmds = Get-Content $cmdFile |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
+    if ($cmds.Count -eq 0) {
+        Write-Error "No valid commands found in '$cmdFile'."
+        exit 1
+    }
+    $commandsByOS[$osType] = $cmds
 }
 
 # ---------------------------------------------
@@ -607,7 +652,9 @@ function Invoke-SSHSession {
         [int]$CmdDelayMs = 500,
         [int]$CmdTimeoutSec = 30,
         [int]$InitialCmdTimeoutSec = 60,
-        [bool]$AllocatePTY = $false
+        [bool]$AllocatePTY = $false,
+        [string[]]$PagingCommands = @(),
+        [string]$OSType = ""
     )
 
     $result = [PSCustomObject]@{
@@ -829,6 +876,17 @@ function Invoke-SSHSession {
             Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 5000 -PromptText ([ref]$lastPrompt) | Out-Null
         }
 
+        # Send paging-disable commands silently (output not logged).
+        # These are OS-specific (e.g. "terminal length 0" for IOS, "config paging disable"
+        # for AireOS) and are sent automatically so users don't need them in command files.
+        foreach ($pagingCmd in $PagingCommands) {
+            $proc.StandardInput.WriteLine($pagingCmd)
+            $proc.StandardInput.Flush()
+            $pagingDrain = [System.Text.StringBuilder]::new()
+            Read-UntilPrompt -Queue $lineQueue -Builder $pagingDrain `
+                -PromptRegex $promptRegex -TimeoutMs 10000 -PromptText ([ref]$lastPrompt) | Out-Null
+        }
+
         # Send each command and wait for the resulting prompt before proceeding.
         # This guarantees all output from a command is collected before the next
         # command is sent, eliminating the out-of-order output race condition.
@@ -974,6 +1032,7 @@ function Invoke-SSHSession {
             " Status    : $($result.Status)"
             " Conn Tmout: ${Timeout}s"
             " Cmd Tmout : ${CmdTimeoutSec}s"
+            " OS Type  : $OSType"
             " PTY      : $ptyFlag"
             $separator
             ""
@@ -1031,6 +1090,7 @@ function Invoke-SSHSession {
             " Status    : FAILED"
             " Conn Tmout: ${Timeout}s"
             " Cmd Tmout : ${CmdTimeoutSec}s"
+            " OS Type  : $OSType"
             " PTY      : $ptyFlag"
             $separator
             ""
@@ -1097,7 +1157,12 @@ function Invoke-SSHSession {
 # MAIN EXECUTION LOOP
 # ---------------------------------------------
 $devCountStr = "$($devices.Count)".PadRight(37)
-$cmdCountStr = "$($commands.Count)".PadRight(37)
+$osBreakdown = ($uniqueOSTypes | ForEach-Object { "$_($(@($devices | Where-Object {$_.OS -eq $_}).Count))" }) -join ", "
+if ($osBreakdown.Length -gt 37) { $osBreakdown = $osBreakdown.Substring(0, 34) + "..." }
+$osBreakdownStr = $osBreakdown.PadRight(37)
+$cmdDirStr = $CommandsDirectory
+if ($cmdDirStr.Length -gt 37) { $cmdDirStr = $cmdDirStr.Substring(0, 34) + "..." }
+$cmdDirStr = $cmdDirStr.PadRight(37)
 $timeoutStr    = "${TimeoutSeconds}s".PadRight(37)
 $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
 $iniTimeoutStr = "${InitialPromptTimeoutSeconds}s".PadRight(37)
@@ -1132,7 +1197,8 @@ Write-Host "+==================================================+" -ForegroundCol
 Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Gray
 Write-Host "+==================================================+" -ForegroundColor Gray
 Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
-Write-Host "|  Commands : ${cmdCountStr}|" -ForegroundColor Gray
+Write-Host "|  OS Types : ${osBreakdownStr}|" -ForegroundColor Gray
+Write-Host "|  Cmd Dir  : ${cmdDirStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Ini Tmout: ${iniTimeoutStr}|" -ForegroundColor Gray
@@ -1157,9 +1223,15 @@ $deviceNum      = 0
 $authRetryCount = 0
 $maxAuthRetries = 3
 
-foreach ($ip in $devices) {
+foreach ($device in $devices) {
     $deviceNum++
-    Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ... " -NoNewline
+    $ip = $device.IP
+    $os = $device.OS
+    Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ($os) ... " -NoNewline
+
+    # Look up commands and paging for this device's OS
+    $commands = $commandsByOS[$os]
+    $pagingCmds = @($validOSTypes[$os])
 
     # Pre-connection ping test: skip unreachable devices immediately.
     if ($PingTest) {
@@ -1193,7 +1265,9 @@ foreach ($ip in $devices) {
             -CmdDelayMs            $CommandDelayMs `
             -CmdTimeoutSec         $CommandTimeoutSeconds `
             -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds `
-            -AllocatePTY           $AllocatePTY
+            -AllocatePTY           $AllocatePTY `
+            -PagingCommands        $pagingCmds `
+            -OSType                $os
 
         if ($sessionResult.AuthFailed) {
             $authRetryCount++
@@ -1297,9 +1371,14 @@ if ($JsonEnabled) {
             ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
             failed_ip_addresses = @($failedIPs)
         }
-        commands = [ordered]@{
-            count = $commands.Count
-            list  = @($commands)
+        commands_directory = $CommandsDirectory
+        os_types = [ordered]@{}
+    }
+    foreach ($osKey in $uniqueOSTypes) {
+        $sessionDoc.os_types[$osKey] = [ordered]@{
+            device_count = @($devices | Where-Object { $_.OS -eq $osKey }).Count
+            command_count = $commandsByOS[$osKey].Count
+            commands = @($commandsByOS[$osKey])
         }
     }
     $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"

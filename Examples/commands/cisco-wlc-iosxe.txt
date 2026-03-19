@@ -1,0 +1,9 @@
+# Cisco WLC IOS-XE (Catalyst 9800) commands (paging disabled automatically via "terminal length 0")
+show startup-config | include hostname
+show version
+show inventory
+show ip interface brief
+show wlan summary
+show ap summary
+show wireless client summary
+show run
