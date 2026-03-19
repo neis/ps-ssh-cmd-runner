@@ -854,6 +854,11 @@ function Invoke-SSHSession {
             $cmdPrompt = $lastPrompt
             $lastPrompt = ""
             if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt))) {
+                # Flush any partial output received before the timeout so it appears
+                # in the failure log's PARTIAL OUTPUT section for troubleshooting.
+                if ($cmdOutputBuilder.Length -gt 0) {
+                    $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
+                }
                 $proc.Kill()
                 throw "Timed out waiting for device prompt after command '$cmd'."
             }
