@@ -2,6 +2,7 @@
 logs/
 json/
 netcortex/
+Troubleshooting/
 
 # Ignore config file (use [example] config.json as a reference)
 config.json
