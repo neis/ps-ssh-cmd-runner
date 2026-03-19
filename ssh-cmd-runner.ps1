@@ -108,6 +108,11 @@
     created. Has no effect if CompressOutput is $false or if archive creation fails.
     Default is $false.
 
+.PARAMETER CompressOnly
+    When specified, compresses existing output directories and exits without connecting
+    to any devices. Useful for archiving output from a previous run. Ignores CompressWhen
+    (always compresses). Respects DeleteAfterCompress and output directory paths.
+
 .EXAMPLE
     .\Invoke-NetworkSSH.ps1
 
@@ -205,7 +210,10 @@ param(
     [string]$CompressWhen = "Always",
 
     [Parameter(Mandatory = $false, HelpMessage = "Delete output directories after successful archive creation (default: false)")]
-    [bool]$DeleteAfterCompress = $false
+    [bool]$DeleteAfterCompress = $false,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Compress existing output directories and exit without processing devices")]
+    [switch]$CompressOnly
 )
 
 # ---------------------------------------------
@@ -269,6 +277,17 @@ $osPlatform = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
 $psEngine = "PowerShell $($PSVersionTable.PSVersion.ToString())"
 $separator = ("=" * 59)
 $thinSep = ("-" * 40)
+
+# ---------------------------------------------
+# COMPRESS-ONLY MODE — archive existing output and exit
+# ---------------------------------------------
+if ($CompressOnly) {
+    Write-Host ""
+    Write-Host "Compress-only mode - archiving existing output directories." -ForegroundColor Cyan
+    Invoke-CompressOutput -OutputDirectories @($LogDirectory, $JsonDirectory, $NetcortexDirectory) -Cleanup $DeleteAfterCompress
+    Write-Host ""
+    exit 0
+}
 
 # Valid OS types and their session behaviors.
 # PagingCommand  : sent silently after login to disable output paging
@@ -640,6 +659,92 @@ function Read-UntilPrompt {
         }
     }
     return $false
+}
+
+# ---------------------------------------------
+# HELPER FUNCTION: Compress output directories into nested zip archive
+# Creates individual zips for each output directory (logs.zip, json.zip, etc.)
+# then bundles them into a single outer archive: ssh-session-<timestamp>.zip
+# ---------------------------------------------
+function Invoke-CompressOutput {
+    param(
+        [string[]]$OutputDirectories,
+        [bool]$Cleanup = $false
+    )
+
+    $archiveTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $archiveName = "ssh-session-${archiveTimestamp}.zip"
+    $archivePath = Join-Path $PSScriptRoot $archiveName
+
+    # Filter to directories that exist and contain at least one file
+    $dirsToArchive = @($OutputDirectories) |
+        Where-Object {
+            (Test-Path $_ -PathType Container) -and
+            (Get-ChildItem -LiteralPath $_ -Recurse -File -ErrorAction SilentlyContinue |
+             Select-Object -First 1)
+        }
+
+    Write-Host ""
+    if ($dirsToArchive.Count -eq 0) {
+        Write-Host "Compression skipped: no output directories with files found on disk." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "Compressing output directories ..." -ForegroundColor Cyan
+
+    $archiveSuccess = $false
+    $tempDir = Join-Path $PSScriptRoot ".compress-temp-$archiveTimestamp"
+    try {
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
+        # Create an individual zip for each output directory
+        foreach ($dir in $dirsToArchive) {
+            $leafName = (Get-Item $dir).Name
+            $innerZip = Join-Path $tempDir "$leafName.zip"
+            Compress-Archive -Path (Join-Path $dir '*') -DestinationPath $innerZip -Force
+            Write-Host "  Packed: $leafName.zip" -ForegroundColor Gray
+        }
+
+        # Bundle individual zips into the final outer archive
+        Compress-Archive -Path (Join-Path $tempDir '*') -DestinationPath $archivePath -Force
+        $archiveSuccess = (Test-Path $archivePath)
+    }
+    catch {
+        Write-Host "  ERROR: Compression failed - $($_.Exception.Message)" -ForegroundColor Red
+    }
+    finally {
+        # Always clean up the temp directory
+        if (Test-Path $tempDir) {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($archiveSuccess) {
+        $archiveItem    = Get-Item $archivePath
+        $archiveSizeStr = if ($archiveItem.Length -ge 1MB) {
+            "{0:0.0} MB" -f ($archiveItem.Length / 1MB)
+        }
+        else {
+            "{0:0.0} KB" -f ($archiveItem.Length / 1KB)
+        }
+        Write-Host "  Archive: $archiveName ($archiveSizeStr)" -ForegroundColor Green
+
+        if ($Cleanup) {
+            foreach ($dir in $dirsToArchive) {
+                try {
+                    Remove-Item -Path $dir -Recurse -Force -ErrorAction Stop
+                    Write-Verbose "Removed output directory: $dir"
+                }
+                catch {
+                    Write-Warning "Could not remove '$dir': $($_.Exception.Message)"
+                }
+            }
+            Write-Host "  Output directories removed." -ForegroundColor Gray
+        }
+    }
+    else {
+        Write-Host "  WARNING: Archive creation failed. Output directories were not removed." -ForegroundColor Red
+    }
 }
 
 # ---------------------------------------------
@@ -1442,9 +1547,8 @@ Write-Host "+==================================================+" -ForegroundCol
 
 # ---------------------------------------------
 # POST-RUN COMPRESSION
-# Creates a timestamped .zip archive of all output directories using
-# PowerShell's built-in Compress-Archive.
-# Source directories are only removed when archive creation is confirmed.
+# Creates a timestamped .zip archive with individually-zipped output
+# directories (logs.zip, json.zip, netcortex.zip) inside a single outer archive.
 # ---------------------------------------------
 if ($CompressOutput) {
     $shouldCompress = $true
@@ -1453,63 +1557,8 @@ if ($CompressOutput) {
         Write-Host ""
         Write-Host "Compression skipped: $($failedIPs.Count) device(s) failed (CompressWhen = SuccessOnly)." -ForegroundColor Yellow
     }
-
     if ($shouldCompress) {
-        $archiveName = "ssh-session-${timestamp}.zip"
-        $archivePath = Join-Path $PSScriptRoot $archiveName
-
-        # Collect all configured output directories that exist on disk and contain
-        # at least one file. Empty directories are excluded from the archive.
-        $dirsToArchive = @($LogDirectory, $JsonDirectory, $NetcortexDirectory) |
-            Where-Object {
-                (Test-Path $_ -PathType Container) -and
-                (Get-ChildItem -LiteralPath $_ -Recurse -File -ErrorAction SilentlyContinue |
-                 Select-Object -First 1)
-            }
-
-        Write-Host ""
-        if ($dirsToArchive.Count -eq 0) {
-            Write-Host "Compression skipped: no output directories found on disk." -ForegroundColor Yellow
-        }
-        else {
-            Write-Host "Compressing output via Compress-Archive ..." -ForegroundColor Cyan
-
-            $archiveSuccess = $false
-            try {
-                Compress-Archive -Path $dirsToArchive -DestinationPath $archivePath -Force
-                $archiveSuccess = (Test-Path $archivePath)
-            }
-            catch {
-                Write-Host "  ERROR: Compression failed - $($_.Exception.Message)" -ForegroundColor Red
-            }
-
-            if ($archiveSuccess) {
-                $archiveItem    = Get-Item $archivePath
-                $archiveSizeStr = if ($archiveItem.Length -ge 1MB) {
-                    "{0:0.0} MB" -f ($archiveItem.Length / 1MB)
-                }
-                else {
-                    "{0:0.0} KB" -f ($archiveItem.Length / 1KB)
-                }
-                Write-Host "  Archive: $archiveName ($archiveSizeStr)" -ForegroundColor Green
-
-                if ($DeleteAfterCompress) {
-                    foreach ($dir in $dirsToArchive) {
-                        try {
-                            Remove-Item -Path $dir -Recurse -Force -ErrorAction Stop
-                            Write-Verbose "Removed output directory: $dir"
-                        }
-                        catch {
-                            Write-Warning "Could not remove '$dir': $($_.Exception.Message)"
-                        }
-                    }
-                    Write-Host "  Output directories removed." -ForegroundColor Gray
-                }
-            }
-            else {
-                Write-Host "  WARNING: Archive creation failed. Output directories were not removed." -ForegroundColor Red
-            }
-        }
+        Invoke-CompressOutput -OutputDirectories @($LogDirectory, $JsonDirectory, $NetcortexDirectory) -Cleanup $DeleteAfterCompress
     }
 }
 

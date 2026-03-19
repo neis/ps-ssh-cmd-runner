@@ -213,6 +213,11 @@ When `$true`, removes the original output directories after the archive is succe
 created. Has no effect if `CompressOutput` is `$false` or if archive creation fails.
 Default: `$false`
 
+**CompressOnly** `[switch]`
+Compresses existing output directories and exits immediately without connecting to any
+devices. Useful for archiving output from a previous run. Ignores `CompressWhen` (always
+compresses). Respects `DeleteAfterCompress` and output directory paths.
+
 ## PER-OS COMMAND FILES
 
 Command files live in the `CommandsDirectory` (default: `.\commands`). Each file is named
@@ -330,21 +335,26 @@ NMS platforms.
 ## SESSION COMPRESSION
 
 When `CompressOutput` is `$true`, the script packages all output directories into a single
-timestamped archive at the end of the run:
+timestamped archive at the end of the run. Each output directory is individually zipped first,
+then bundled into the outer archive:
 
 ```
 ssh-session-20260303_143000.zip
+  ├── logs.zip
+  ├── json.zip
+  └── netcortex.zip
 ```
 
 The archive is created in the same directory as the script. Only directories that exist **and
-contain at least one file** are included -- empty directories are silently skipped.
+contain at least one file** are included — empty directories are silently skipped.
 
 | Parameter                      | Effect                                                         |
 | ------------------------------ | -------------------------------------------------------------- |
-| `CompressOutput = $true`       | Enable archiving                                               |
+| `CompressOutput = $true`       | Enable archiving at end of run                                 |
 | `CompressWhen = "Always"`      | Archive regardless of device success/failure                   |
 | `CompressWhen = "SuccessOnly"` | Skip archive if any device failed                              |
 | `DeleteAfterCompress = $true`  | Remove source directories after a confirmed successful archive |
+| `-CompressOnly`                | Archive existing directories and exit (no device connections)  |
 
 ## WINDOWS CREDENTIAL MANAGER
 
@@ -493,3 +503,11 @@ Compress all output directories into a zip archive after the run:
 Compress and remove source directories, but only if all devices succeeded:
 
     .\ssh-cmd-runner.ps1 -CompressOutput $true -CompressWhen SuccessOnly -DeleteAfterCompress $true
+
+Archive existing output directories without running any device connections:
+
+    .\ssh-cmd-runner.ps1 -CompressOnly
+
+Archive existing output and clean up the source directories:
+
+    .\ssh-cmd-runner.ps1 -CompressOnly -DeleteAfterCompress $true
