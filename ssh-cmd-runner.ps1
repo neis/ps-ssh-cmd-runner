@@ -284,12 +284,14 @@ $thinSep = ("-" * 40)
 # ExitCommands        : sequence sent to close the session cleanly (e.g. "logout" then "n" for save prompt)
 # InteractivePattern  : regex matching mid-command prompts that need auto-response "y"
 #                       (e.g. WLC pagination "would you like to display the next N entries? (y/n)")
+# SendInitialNewline  : send an empty line after SSH session starts to trigger the CLI prompt
+#                       (some devices wait for a keystroke before displaying the prompt)
 $validOSTypes = @{
-    'cisco-ios'        = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');       InteractivePattern = '' }
-    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');       InteractivePattern = '' }
-    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';     RequirePTY = $true;  ExitCommands = @('exit');       InteractivePattern = '' }
-    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$' }
-    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');       InteractivePattern = '' }
+    'cisco-ios'        = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';     RequirePTY = $true;  ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$'; SendInitialNewline = $true }
+    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
 }
 
 # Validate input files exist (skip when only compressing)
@@ -822,7 +824,8 @@ function Invoke-SSHSession {
         [string[]]$PagingCommands = @(),
         [string[]]$ExitCommands = @('exit'),
         [string]$OSType = "",
-        [string]$InteractivePattern = ""
+        [string]$InteractivePattern = "",
+        [bool]$SendInitialNewline = $false
     )
 
     $result = [PSCustomObject]@{
@@ -979,6 +982,15 @@ function Invoke-SSHSession {
                 finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
             }).AddArgument($proc.StandardOutput).AddArgument($lineQueue).AddArgument($regexHolder) | Out-Null
         $readerHandle = $readerRunspace.BeginInvoke()
+
+        # Some devices (e.g. WLC AireOS) wait for a keystroke before displaying
+        # the CLI prompt. Send an initial empty line to trigger the prompt.
+        if ($SendInitialNewline) {
+            Start-Sleep -Milliseconds 500   # brief pause for SSH session to fully establish
+            $proc.StandardInput.WriteLine("")
+            $proc.StandardInput.Flush()
+            Write-Verbose "Sent initial newline to trigger prompt on $IPAddress"
+        }
 
         # Wait for the initial device prompt before sending any commands.
         # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
@@ -1456,6 +1468,7 @@ foreach ($device in $devices) {
     $exitCmds = $osProfile.ExitCommands
     $devicePTY = $AllocatePTY -or $osProfile.RequirePTY
     $interactivePattern = $osProfile.InteractivePattern
+    $sendNewline = $osProfile.SendInitialNewline
 
     # Pre-connection ping test: skip unreachable devices immediately.
     if ($PingTest) {
@@ -1490,7 +1503,8 @@ foreach ($device in $devices) {
         -PagingCommands        $pagingCmds `
         -ExitCommands          $exitCmds `
         -OSType                $os `
-        -InteractivePattern    $interactivePattern
+        -InteractivePattern    $interactivePattern `
+        -SendInitialNewline    $sendNewline
 
     if ($sessionResult.Status -eq "Success") {
         Write-Host "OK " -ForegroundColor Green -NoNewline
