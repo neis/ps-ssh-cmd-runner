@@ -684,10 +684,32 @@ function Read-UntilPrompt {
         [int]$TimeoutMs,
         [ref]$PromptText,
         [System.IO.StreamWriter]$StdIn = $null,
-        [System.Text.RegularExpressions.Regex]$InteractiveRegex = $null
+        [System.Text.RegularExpressions.Regex]$InteractiveRegex = $null,
+        [System.Text.RegularExpressions.Regex]$PagerRegex = $null,
+        [System.Text.StringBuilder]$StdErrBuilder = $null
     )
+
+    # Known fatal SSH error patterns — if any appear in stderr, fail immediately
+    # instead of waiting the full timeout.
+    $fatalSshPatterns = @(
+        'Unable to negotiate',
+        'no matching cipher found',
+        'no matching key exchange method found',
+        'no matching host key type found',
+        'Connection refused',
+        'Connection reset',
+        'Connection closed',
+        'Connection timed out',
+        'No route to host',
+        'Network is unreachable',
+        'Host key verification failed',
+        'kex_exchange_identification.*Connection'
+    )
+    $fatalSshRegex = ($fatalSshPatterns -join '|')
+
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     $line = $null
+    $lastStderrCheck = [DateTime]::UtcNow
     while ([DateTime]::UtcNow -lt $deadline) {
         if ($Queue.TryDequeue([ref]$line)) {
             if ($null -eq $line) {
@@ -701,6 +723,15 @@ function Read-UntilPrompt {
                 # The caller will prepend it to the echoed command line.
                 if ($null -ne $PromptText) { $PromptText.Value = $line.TrimEnd() }
                 return $true
+            }
+            # Auto-respond to pager prompts (bare ":" from more/less pager in login banners).
+            # Send a Space to page through, discard the pager line, and keep waiting.
+            if ($null -ne $PagerRegex -and $null -ne $StdIn -and $PagerRegex.IsMatch($line.TrimEnd())) {
+                $StdIn.Write(" ")
+                $StdIn.Flush()
+                # Reset deadline since the device is actively sending data.
+                $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+                continue
             }
             # Auto-respond to interactive mid-command prompts (e.g. WLC pagination).
             # Send "y", discard the prompt line (don't log it), and keep waiting.
@@ -716,6 +747,20 @@ function Read-UntilPrompt {
         }
         else {
             Start-Sleep -Milliseconds 50
+
+            # Periodically check stderr for fatal SSH errors (every ~2 seconds).
+            # This catches connection failures, cipher mismatches, etc. immediately
+            # instead of waiting the full timeout.
+            if ($null -ne $StdErrBuilder -and ([DateTime]::UtcNow - $lastStderrCheck).TotalMilliseconds -ge 2000) {
+                $lastStderrCheck = [DateTime]::UtcNow
+                $stderrContent = $StdErrBuilder.ToString()
+                if ($stderrContent -match $fatalSshRegex) {
+                    # Extract the specific fatal error line for the error message.
+                    $fatalLine = ($stderrContent -split "`n" | Where-Object { $_ -match $fatalSshRegex } | Select-Object -First 1).Trim()
+                    if ($null -ne $PromptText) { $PromptText.Value = "" }
+                    throw "SSH connection failed: $fatalLine"
+                }
+            }
         }
     }
     return $false
@@ -929,6 +974,12 @@ function Invoke-SSHSession {
                 [System.Text.RegularExpressions.RegexOptions]::Compiled
             )
         }
+        # Compiled pager prompt regex — detects bare ":" from more/less pager in login banners.
+        # When matched during initial prompt wait, sends a Space keypress to page through.
+        $pagerRegex = [System.Text.RegularExpressions.Regex]::new(
+            '^\s*:\s*$',
+            [System.Text.RegularExpressions.RegexOptions]::Compiled
+        )
         # Cisco IOS sends the prompt without a trailing newline even without a PTY,
         # so ReadLine() would block indefinitely on the prompt line. The runspace
         # reads one character at a time and flushes to the queue on every newline
@@ -936,14 +987,16 @@ function Invoke-SSHSession {
         # The prompt-flush regex requires a valid hostname prefix before # or >
         # so that pager strings like "--More--" are never mistaken for a prompt.
         $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-        # Two-element array shared with the reader runspace as mutable regex slots.
+        # Three-element array shared with the reader runspace as mutable regex slots.
         # [0] = device prompt pattern (updated after hostname discovery)
         # [1] = interactive prompt pattern (e.g. WLC pagination "(y/n)")
+        # [2] = pager prompt pattern (bare ":" from more/less pager in login banners)
         # The outer scope overwrites these; the runspace reads them on every character.
         # String reference assignment is atomic in .NET.
-        $regexHolder = [string[]]::new(2)
+        $regexHolder = [string[]]::new(3)
         $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>)\s*$'
         $regexHolder[1] = $InteractivePattern   # populated per-OS if interactive prompts are needed
+        $regexHolder[2] = '^\s*:\s*$'           # bare ":" pager prompt (more/less)
 
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
@@ -971,6 +1024,9 @@ function Invoke-SSHSession {
                                 $queue.Enqueue($s)
                                 $buf.Clear() | Out-Null
                             } elseif ($holder[1] -and $s -match $holder[1]) {
+                                $queue.Enqueue($s)
+                                $buf.Clear() | Out-Null
+                            } elseif ($holder[2] -and $s -match $holder[2]) {
                                 $queue.Enqueue($s)
                                 $buf.Clear() | Out-Null
                             }
@@ -1003,7 +1059,8 @@ function Invoke-SSHSession {
             # Phase 1: Quick check (up to 10s) — enough for stty error to appear in stderr.
             # If the prompt arrives quickly, we proceed immediately.
             $quickMs = [Math]::Min(10000, $initialTimeoutMs)
-            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $quickMs -PromptText ([ref]$lastPrompt)
+            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $quickMs -PromptText ([ref]$lastPrompt) `
+                -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
 
             if (-not $promptFound) {
                 # Check stderr for stty failure — indicates device requires PTY allocation.
@@ -1019,13 +1076,15 @@ function Invoke-SSHSession {
                 # No stty error — continue waiting for the remaining initial timeout.
                 $remainingMs = $initialTimeoutMs - $quickMs
                 if ($remainingMs -gt 0) {
-                    $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt)
+                    $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt) `
+                        -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
                 }
             }
         }
         else {
             # AllocatePTY is true (or this is a PTY retry): use the full initial timeout.
-            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $initialTimeoutMs -PromptText ([ref]$lastPrompt)
+            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $initialTimeoutMs -PromptText ([ref]$lastPrompt) `
+                -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
         }
 
         if (-not $promptFound) {
