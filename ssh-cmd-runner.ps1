@@ -503,6 +503,7 @@ Set-AskPassScript -ScriptPath $askPassScript -Password $password
 #   Juniper JunOS    :  user@hostname>  user@hostname#
 #   Palo Alto        :  user@hostname>  user@hostname#
 #   HP/Aruba         :  hostname#  hostname>
+#   Cisco WLC        :  (Cisco Controller) >  (hostname from "show sysinfo")
 #   Linux-based NOS  :  user@hostname:~$  [user@hostname ~]$
 # ---------------------------------------------
 function Get-HostnameFromPrompt {
@@ -530,6 +531,13 @@ function Get-HostnameFromPrompt {
 
         # Linux-style: [user@hostname ~]$ or [user@hostname ~]#
         if ($trimmed -match '^\[?\S+?@([A-Za-z0-9_-]+)\s') {
+            return $Matches[1]
+        }
+
+        # Cisco WLC: hostname from "show sysinfo" output (System Name field).
+        # The WLC prompt "(Cisco Controller) >" doesn't contain the hostname,
+        # so we extract it from command output instead.
+        if ($trimmed -match '^System Name\.+\s+(\S+)') {
             return $Matches[1]
         }
     }
@@ -691,7 +699,7 @@ function Invoke-SSHSession {
         # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
         # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
         $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)',
+            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\(Cisco Controller\)\s*[>#])',
             [System.Text.RegularExpressions.RegexOptions]::Compiled
         )
         # Cisco IOS sends the prompt without a trailing newline even without a PTY,
@@ -705,7 +713,7 @@ function Invoke-SSHSession {
         # The outer scope overwrites [0] once the device hostname is known; the runspace
         # reads it on every character iteration. String reference assignment is atomic in .NET.
         $regexHolder = [string[]]::new(1)
-        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$'
+        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\(Cisco Controller\)\s*[>#])\s*$'
 
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
