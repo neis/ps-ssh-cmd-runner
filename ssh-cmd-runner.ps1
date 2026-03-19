@@ -326,15 +326,15 @@ if (-not $CompressOnly) {
     # Read device CSV (IP,OS columns with header row)
     # Pre-filter comment lines (# prefix) and blank lines before CSV parsing
     # so that free-form comments don't break Import-Csv column expectations.
-    $csvLines = Get-Content $DeviceListFile | Where-Object {
-        $trimmed = $_.Trim()
-        $trimmed -ne "" -and -not $trimmed.StartsWith('#')
-    }
-    if ($null -eq $csvLines -or @($csvLines).Count -eq 0) {
+    $csvLines = @(Get-Content $DeviceListFile | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimStart().StartsWith('#')
+    })
+    if ($csvLines.Count -le 1) {
+        # Need at least a header row + one data row
         Write-Error "No devices found in '$DeviceListFile'."
         exit 1
     }
-    $devicesCsv = $csvLines | ConvertFrom-Csv
+    $devicesCsv = @($csvLines | ConvertFrom-Csv)
     if ($devicesCsv.Count -eq 0) {
         Write-Error "No devices found in '$DeviceListFile'."
         exit 1
