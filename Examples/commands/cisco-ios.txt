@@ -1,0 +1,17 @@
+# Cisco IOS commands (paging disabled automatically via "terminal length 0")
+show startup-config | include hostname|switchname
+show lldp neighbors
+show cdp neighbors detail
+show lldp neighbors detail
+show version
+show inventory
+show interface
+show interface status
+show vlan
+show ip route
+show power inline
+show log
+show spanning-tree detail
+show mac address-table
+show ip arp
+show run
