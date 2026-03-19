@@ -815,7 +815,10 @@ function Invoke-SSHSession {
 
             if (-not $promptFound) {
                 # Check stderr for stty failure — indicates device requires PTY allocation.
-                if ($stdErrBuilder.ToString() -match "stty.*Inappropriate ioctl") {
+                # Different SSH/OS combos produce different error messages:
+                #   "stty: ... Inappropriate ioctl for device"  (Linux/macOS)
+                #   "stty: standard input: Invalid argument"    (NX-OS, some others)
+                if ($stdErrBuilder.ToString() -match "stty.*(?:Inappropriate ioctl|Invalid argument)") {
                     Write-Verbose "stty error detected on $IPAddress - retrying with PTY allocation (-tt)"
                     $usePTY = $true
                     continue   # finally cleans up this attempt, loop retries with -tt
@@ -834,10 +837,11 @@ function Invoke-SSHSession {
         }
 
         if (-not $promptFound) {
-            # Aggressive fallback: if this was a -T attempt with zero stdout, retry with PTY.
-            # Covers devices that need PTY but don't produce the stty error (e.g. libssh servers).
-            if (-not $usePTY -and $ptyAttempt -eq 0 -and $stdOutBuilder.Length -eq 0) {
-                Write-Verbose "Zero stdout on $IPAddress after ${InitialCmdTimeoutSec}s - retrying with PTY allocation (-tt)"
+            # Aggressive fallback: if this was a -T attempt with no meaningful stdout, retry with PTY.
+            # Covers devices that need PTY but don't produce the stty error (e.g. libssh servers),
+            # and devices that send whitespace-only output (blank lines, newlines) before stalling.
+            if (-not $usePTY -and $ptyAttempt -eq 0 -and $stdOutBuilder.ToString().Trim().Length -eq 0) {
+                Write-Verbose "No meaningful stdout on $IPAddress after ${InitialCmdTimeoutSec}s - retrying with PTY allocation (-tt)"
                 $usePTY = $true
                 continue   # finally cleans up, loop retries with -tt
             }
