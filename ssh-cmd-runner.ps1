@@ -1300,9 +1300,9 @@ if ($CompressOnly) {
 # MAIN EXECUTION LOOP
 # ---------------------------------------------
 $devCountStr = "$($devices.Count)".PadRight(37)
-$osBreakdown = ($uniqueOSTypes | ForEach-Object { $osName = $_; "$osName($(@($devices | Where-Object { $_.OS -eq $osName }).Count))" }) -join ", "
-if ($osBreakdown.Length -gt 37) { $osBreakdown = $osBreakdown.Substring(0, 34) + "..." }
-$osBreakdownStr = $osBreakdown.PadRight(37)
+$osBreakdownLines = @($uniqueOSTypes | ForEach-Object {
+    $osName = $_; "$osName($(@($devices | Where-Object { $_.OS -eq $osName }).Count))"
+})
 $cmdDirStr = $CommandsDirectory
 if ($cmdDirStr.Length -gt 37) { $cmdDirStr = $cmdDirStr.Substring(0, 34) + "..." }
 $cmdDirStr = $cmdDirStr.PadRight(37)
@@ -1340,7 +1340,13 @@ Write-Host "+==================================================+" -ForegroundCol
 Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Gray
 Write-Host "+==================================================+" -ForegroundColor Gray
 Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
-Write-Host "|  OS Types : ${osBreakdownStr}|" -ForegroundColor Gray
+for ($i = 0; $i -lt $osBreakdownLines.Count; $i++) {
+    $label = if ($i -eq 0) { "|  OS Types : " } else { "|             " }
+    $value = $osBreakdownLines[$i]
+    if ($value.Length -gt 37) { $value = $value.Substring(0, 34) + "..." }
+    $value = $value.PadRight(37)
+    Write-Host "${label}${value}|" -ForegroundColor Gray
+}
 Write-Host "|  Cmd Dir  : ${cmdDirStr}|" -ForegroundColor Gray
 Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
 Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
