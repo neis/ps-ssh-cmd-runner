@@ -1112,13 +1112,22 @@ function Invoke-SSHSession {
         $stdOut = $stdOutBuilder.ToString()
         $stdErr = $stdErrBuilder.ToString().Trim()
 
-        # Determine success or failure
-        if ($proc.ExitCode -ne 0) {
+        # Determine success or failure.
+        # A non-zero exit code alone does not mean failure — some devices (e.g. AireOS
+        # WLC "logout") close the connection in a way that produces SSH exit code -1
+        # even though all commands completed successfully. If every command ran and
+        # returned a prompt, the session is successful regardless of SSH exit code.
+        $allCommandsRan = ($result.CommandResults.Count -eq $CommandList.Count)
+        if ($allCommandsRan) {
+            $result.Status = "Success"
+            if ($proc.ExitCode -ne 0) {
+                Write-Verbose "SSH exit code $($proc.ExitCode) on $IPAddress ignored - all $($CommandList.Count) commands completed."
+            }
+        } elseif ($proc.ExitCode -ne 0) {
             $result.Status = "Failed"
             if ([string]::IsNullOrWhiteSpace($stdErr)) {
                 $result.Error = "SSH exit code $($proc.ExitCode)"
-            }
-            else {
+            } else {
                 # Parse each line of debug for final error output detail
                 $errorLines = $stdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
                 foreach ($err in $errorLines) {
@@ -1126,8 +1135,7 @@ function Invoke-SSHSession {
                 }
             }
             $result.AuthFailed = Test-IsAuthFailure -StdErr $stdErr
-        }
-        else {
+        } else {
             $result.Status = "Success"
         }
 
