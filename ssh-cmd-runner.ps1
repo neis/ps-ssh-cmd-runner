@@ -1169,7 +1169,7 @@ function Invoke-SSHSession {
 # MAIN EXECUTION LOOP
 # ---------------------------------------------
 $devCountStr = "$($devices.Count)".PadRight(37)
-$osBreakdown = ($uniqueOSTypes | ForEach-Object { "$_($(@($devices | Where-Object {$_.OS -eq $_}).Count))" }) -join ", "
+$osBreakdown = ($uniqueOSTypes | ForEach-Object { $osName = $_; "$osName($(@($devices | Where-Object { $_.OS -eq $osName }).Count))" }) -join ", "
 if ($osBreakdown.Length -gt 37) { $osBreakdown = $osBreakdown.Substring(0, 34) + "..." }
 $osBreakdownStr = $osBreakdown.PadRight(37)
 $cmdDirStr = $CommandsDirectory
