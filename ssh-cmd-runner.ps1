@@ -629,7 +629,7 @@ function Get-HostnameFromPrompt {
         }
 
         # Cisco / Arista / HP style: hostname# or hostname> or hostname(config-xxx)#
-        if ($trimmed -match '^([A-Za-z][A-Za-z0-9._-]*)(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$') {
+        if ($trimmed -match '^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$') {
             $candidate = $Matches[1]
             $falsePositives = @('yes', 'no', 'ok', 'error', 'warning', 'info', 'true', 'false')
             if ($candidate.Length -ge 2 -and $candidate.ToLower() -notin $falsePositives) {
