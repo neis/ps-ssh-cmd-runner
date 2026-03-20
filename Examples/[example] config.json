@@ -4,7 +4,7 @@
     "LogDirectory": "./logs",
     "TimeoutSeconds": 10,
     "ExtraSSHOptions": [],
-    "CommandDelayMs": 500,
+    "CommandDelayMs": 100,
     "CommandTimeoutSeconds": 30,
     "InitialPromptTimeoutSeconds": 60,
     "AllocatePTY": false,

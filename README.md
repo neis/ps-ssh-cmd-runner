@@ -93,7 +93,7 @@ Copy `[example] config.json` from the `Examples/` directory to `config.json` and
   "LogDirectory": "./logs",
   "TimeoutSeconds": 10,
   "ExtraSSHOptions": [],
-  "CommandDelayMs": 500,
+  "CommandDelayMs": 100,
   "CommandTimeoutSeconds": 30,
   "InitialPromptTimeoutSeconds": 60,
   "AllocatePTY": false,
@@ -134,7 +134,8 @@ Default: `10`
 **CommandDelayMs** `[int]`
 Delay in milliseconds to wait after receiving the device prompt before sending the next
 command. Useful for slower devices or commands that produce large output where the prompt
-may appear before the output buffer is fully flushed. Valid range: 100-10000. Default: `500`
+may appear before the output buffer is fully flushed. Set to `0` for fastest operation.
+Valid range: 0-10000. Default: `100`
 
 **CommandTimeoutSeconds** `[int]`
 Maximum time in seconds to wait for the device to return its prompt after each command is

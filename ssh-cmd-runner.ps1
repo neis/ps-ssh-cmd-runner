@@ -32,8 +32,8 @@
 .PARAMETER CommandDelayMs
     Delay in milliseconds between sending each command to the device.
     Prevents output interleaving caused by commands arriving faster than
-    the device can process them. *Default is 0ms*. Increase for slower
-    devices or commands that produce large output.
+    the device can process them. Default is 100ms. Set to 0 for fastest
+    operation, or increase for slower devices. Valid range: 0-10000.
 
 .PARAMETER CommandTimeoutSeconds
     Maximum time in seconds to wait for a device to return its prompt after each
@@ -163,9 +163,9 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Additional SSH options for legacy/special devices (e.g. '-o','KexAlgorithms=+diffie-hellman-group1-sha1')")]
     [string[]]$ExtraSSHOptions = @(),
 
-    [Parameter(Mandatory = $false, HelpMessage = "Delay in milliseconds between sending each command to the device (default 500)")]
-    [ValidateRange(100, 10000)]
-    [int]$CommandDelayMs = 500,
+    [Parameter(Mandatory = $false, HelpMessage = "Delay in milliseconds between sending each command to the device (default 100)")]
+    [ValidateRange(0, 10000)]
+    [int]$CommandDelayMs = 100,
 
     [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait for device prompt after each command (default 30). Increase for commands with large output.")]
     [ValidateRange(5, 600)]
@@ -754,10 +754,10 @@ function Read-UntilPrompt {
         else {
             Start-Sleep -Milliseconds 50
 
-            # Periodically check stderr for fatal SSH errors (every ~2 seconds).
+            # Periodically check stderr for fatal SSH errors (every ~500ms).
             # This catches connection failures, cipher mismatches, etc. immediately
             # instead of waiting the full timeout.
-            if ($null -ne $StdErrBuilder -and ([DateTime]::UtcNow - $lastStderrCheck).TotalMilliseconds -ge 2000) {
+            if ($null -ne $StdErrBuilder -and ([DateTime]::UtcNow - $lastStderrCheck).TotalMilliseconds -ge 500) {
                 $lastStderrCheck = [DateTime]::UtcNow
                 $stderrContent = $StdErrBuilder.ToString()
                 if ($stderrContent -match $fatalSshRegex) {
@@ -1073,9 +1073,9 @@ function Invoke-SSHSession {
         $promptFound = $false
 
         if (-not $usePTY -and $ptyAttempt -eq 0) {
-            # Phase 1: Quick check (up to 10s) — enough for stty error to appear in stderr.
+            # Phase 1: Quick check (up to 3s) — enough for stty error to appear in stderr.
             # If the prompt arrives quickly, we proceed immediately.
-            $quickMs = [Math]::Min(10000, $initialTimeoutMs)
+            $quickMs = [Math]::Min(3000, $initialTimeoutMs)
             $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $quickMs -PromptText ([ref]$lastPrompt) `
                 -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
 
@@ -1149,9 +1149,9 @@ function Invoke-SSHSession {
             $proc.StandardInput.Flush()
             $sttyDrain = [System.Text.StringBuilder]::new()
             # Drain the echoed prompt prefix that the PTY sends back
-            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 5000 -PromptText ([ref]$null) | Out-Null
+            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$null) | Out-Null
             # Drain the stty command text echo and wait for the real prompt
-            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 5000 -PromptText ([ref]$lastPrompt) | Out-Null
+            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$lastPrompt) | Out-Null
         }
 
         # Send paging-disable commands silently (output not logged).
@@ -1162,7 +1162,7 @@ function Invoke-SSHSession {
             $proc.StandardInput.Flush()
             $pagingDrain = [System.Text.StringBuilder]::new()
             Read-UntilPrompt -Queue $lineQueue -Builder $pagingDrain `
-                -PromptRegex $promptRegex -TimeoutMs 10000 -PromptText ([ref]$lastPrompt) | Out-Null
+                -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$lastPrompt) | Out-Null
         }
 
         # Send each command and wait for the resulting prompt before proceeding.
@@ -1181,7 +1181,7 @@ function Invoke-SSHSession {
             # Dequeue that echo and join it with the held prompt to produce the
             # natural "hostname#show inventory" layout seen in a live session.
             $echoLine = ""
-            $echoDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+            $echoDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
             while ([DateTime]::UtcNow -lt $echoDeadline) {
                 if ($lineQueue.TryDequeue([ref]$echoLine)) { break }
                 Start-Sleep -Milliseconds 20
@@ -1241,7 +1241,7 @@ function Invoke-SSHSession {
             foreach ($exitCmd in $ExitCommands) {
                 $proc.StandardInput.WriteLine($exitCmd)
                 $proc.StandardInput.Flush()
-                Start-Sleep -Milliseconds 500
+                Start-Sleep -Milliseconds 100
             }
         }
         $proc.StandardInput.Close()
@@ -1252,14 +1252,14 @@ function Invoke-SSHSession {
         # Wait for the SSH process to exit. Use a fixed short timeout rather than
         # one proportional to commands — all commands have already completed at this
         # point, so only a brief window is needed for the process to close cleanly.
-        $postSessionTimeoutMs = 10000
+        $postSessionTimeoutMs = 3000
         $exited = $proc.WaitForExit($postSessionTimeoutMs)
 
         if (-not $exited) {
             # All commands completed successfully; the process just didn't exit
             # cleanly (common with PTY sessions). Kill it — this is not an error.
             $proc.Kill()
-            Write-Verbose "SSH process on $IPAddress did not exit within 10s after session end - killed."
+            Write-Verbose "SSH process on $IPAddress did not exit within 3s after session end - killed."
         }
 
         Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
