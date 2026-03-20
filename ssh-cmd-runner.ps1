@@ -706,6 +706,10 @@ function Read-UntilPrompt {
     )
     $fatalSshRegex = ($fatalSshPatterns -join '|')
 
+    # ANSI escape sequence pattern — safety strip for any sequences that
+    # leak through the runspace's cleaning pass (e.g. split across reads).
+    $ansiPattern = '\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[\x20-\x2F][\x30-\x7E]|\x1b.'
+
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     $line = $null
     $lastStderrCheck = [DateTime]::UtcNow
@@ -717,6 +721,9 @@ function Read-UntilPrompt {
                 if ($null -ne $PromptText) { $PromptText.Value = "" }
                 return $true
             }
+            # Strip any residual ANSI codes the runspace may not have caught
+            # (e.g. sequences split across read boundaries).
+            $line = $line -replace $ansiPattern, ''
             if ($PromptRegex.IsMatch($line.TrimEnd())) {
                 # Hold the prompt — do NOT append it to Builder yet.
                 # The caller will prepend it to the echoed command line.
@@ -1000,6 +1007,10 @@ function Invoke-SSHSession {
         $readerRunspace = [PowerShell]::Create()
         $readerRunspace.AddScript({
                 param($reader, $queue, $holder)
+                # Regex to strip ANSI escape sequences (CSI sequences, OSC sequences,
+                # and bare ESC + single char). PTY-allocated sessions often wrap the
+                # prompt in escape codes that prevent the prompt regex from matching.
+                $ansiPattern = '\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[\x20-\x2F][\x30-\x7E]|\x1b.'
                 try {
                     $buf = [System.Text.StringBuilder]::new()
                     while ($true) {
@@ -1008,30 +1019,37 @@ function Invoke-SSHSession {
                         $ch = [char]$c
                         if ($ch -eq "`r") { continue }   # discard bare CR
                         if ($ch -eq "`n") {
-                            $queue.Enqueue($buf.ToString())
+                            # Strip ANSI codes before enqueuing the completed line.
+                            $cleaned = $buf.ToString() -replace $ansiPattern, ''
+                            $queue.Enqueue($cleaned)
                             $buf.Clear() | Out-Null
                         }
                         else {
                             $buf.Append($ch) | Out-Null
-                            $s = $buf.ToString()
-                            # Flush when the buffer matches the device prompt or an
+                            # Strip ANSI codes before testing the buffer against prompt patterns.
+                            # The raw buffer may contain escape sequences that prevent matching.
+                            $stripped = $buf.ToString() -replace $ansiPattern, ''
+                            # Flush when the stripped buffer matches the device prompt or an
                             # interactive prompt (e.g. WLC pagination "(y/n)").
                             # After the hostname is discovered the outer scope writes a
                             # tighter hostname-anchored pattern into $holder[0], preventing
                             # table column headers (e.g. "Switch#") from being flushed.
-                            if ($s -match $holder[0]) {
-                                $queue.Enqueue($s)
+                            if ($stripped -match $holder[0]) {
+                                $queue.Enqueue($stripped)
                                 $buf.Clear() | Out-Null
-                            } elseif ($holder[1] -and $s -match $holder[1]) {
-                                $queue.Enqueue($s)
+                            } elseif ($holder[1] -and $stripped -match $holder[1]) {
+                                $queue.Enqueue($stripped)
                                 $buf.Clear() | Out-Null
-                            } elseif ($holder[2] -and $s -match $holder[2]) {
-                                $queue.Enqueue($s)
+                            } elseif ($holder[2] -and $stripped -match $holder[2]) {
+                                $queue.Enqueue($stripped)
                                 $buf.Clear() | Out-Null
                             }
                         }
                     }
-                    if ($buf.Length -gt 0) { $queue.Enqueue($buf.ToString()) }
+                    if ($buf.Length -gt 0) {
+                        $cleaned = $buf.ToString() -replace $ansiPattern, ''
+                        $queue.Enqueue($cleaned)
+                    }
                 }
                 catch { }
                 finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
