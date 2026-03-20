@@ -1056,21 +1056,23 @@ function Invoke-SSHSession {
             }).AddArgument($proc.StandardOutput).AddArgument($lineQueue).AddArgument($regexHolder) | Out-Null
         $readerHandle = $readerRunspace.BeginInvoke()
 
-        # Some devices (e.g. WLC AireOS) wait for a keystroke before displaying
-        # the CLI prompt. Send an initial empty line to trigger the prompt.
-        if ($SendInitialNewline) {
-            Start-Sleep -Milliseconds 500   # brief pause for SSH session to fully establish
-            $proc.StandardInput.WriteLine("")
-            $proc.StandardInput.Flush()
-            Write-Verbose "Sent initial newline to trigger prompt on $IPAddress"
-        }
-
         # Wait for the initial device prompt before sending any commands.
         # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
         $initialTimeoutMs = $InitialCmdTimeoutSec * 1000
         $perCmdTimeoutMs  = $CmdTimeoutSec * 1000
         $lastPrompt = ""
         $promptFound = $false
+        $newlineNudgeSent = $false
+
+        # OS profiles that require an immediate newline get one right away
+        # (e.g. WLC AireOS devices that won't display the prompt without a keypress).
+        if ($SendInitialNewline) {
+            Start-Sleep -Milliseconds 500
+            $proc.StandardInput.WriteLine("")
+            $proc.StandardInput.Flush()
+            Write-Verbose "Sent initial newline (OS profile) to trigger prompt on $IPAddress"
+            $newlineNudgeSent = $true
+        }
 
         if (-not $usePTY -and $ptyAttempt -eq 0) {
             # Phase 1: Quick check (up to 3s) — enough for stty error to appear in stderr.
@@ -1090,7 +1092,18 @@ function Invoke-SSHSession {
                     continue   # finally cleans up this attempt, loop retries with -tt
                 }
 
-                # No stty error — continue waiting for the remaining initial timeout.
+                # Universal newline nudge — some devices (ISR routers, certain IOS-XE
+                # platforms) wait for a keypress after the MOTD before showing the prompt.
+                # Send a blank line as a nudge, then continue waiting. Harmless on devices
+                # that already showed their prompt (IOS just redisplays the prompt).
+                if (-not $newlineNudgeSent) {
+                    $proc.StandardInput.WriteLine("")
+                    $proc.StandardInput.Flush()
+                    Write-Verbose "Sent newline nudge to trigger prompt on $IPAddress (no prompt after ${quickMs}ms)"
+                    $newlineNudgeSent = $true
+                }
+
+                # Continue waiting for the remaining initial timeout.
                 $remainingMs = $initialTimeoutMs - $quickMs
                 if ($remainingMs -gt 0) {
                     $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt) `
@@ -1100,8 +1113,25 @@ function Invoke-SSHSession {
         }
         else {
             # AllocatePTY is true (or this is a PTY retry): use the full initial timeout.
-            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $initialTimeoutMs -PromptText ([ref]$lastPrompt) `
+            # First try a short wait in case the prompt arrives immediately.
+            $nudgeMs = [Math]::Min(3000, $initialTimeoutMs)
+            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $nudgeMs -PromptText ([ref]$lastPrompt) `
                 -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+
+            if (-not $promptFound) {
+                # Send a newline nudge if one hasn't been sent yet, then wait the remaining time.
+                if (-not $newlineNudgeSent) {
+                    $proc.StandardInput.WriteLine("")
+                    $proc.StandardInput.Flush()
+                    Write-Verbose "Sent newline nudge to trigger prompt on $IPAddress (PTY, no prompt after ${nudgeMs}ms)"
+                    $newlineNudgeSent = $true
+                }
+                $remainingMs = $initialTimeoutMs - $nudgeMs
+                if ($remainingMs -gt 0) {
+                    $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt) `
+                        -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+                }
+            }
         }
 
         if (-not $promptFound) {
