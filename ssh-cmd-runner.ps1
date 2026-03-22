@@ -1207,13 +1207,27 @@ function Invoke-SSHSession {
             $proc.StandardInput.WriteLine($cmd)
             $proc.StandardInput.Flush()
 
-            # Cisco IOS echoes the command back as the first line of output.
-            # Dequeue that echo and join it with the held prompt to produce the
-            # natural "hostname#show inventory" layout seen in a live session.
+            # Drain stale prompt lines from the queue before looking for the echo.
+            # WLC AireOS (and some other devices) echo the prompt multiple times
+            # after paging commands or newline nudges. If these stale prompts are
+            # left in the queue, Read-UntilPrompt matches one as the "end of command"
+            # prompt and returns before any real output arrives, causing output to
+            # cascade into the next command's section.
             $echoLine = ""
             $echoDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
             while ([DateTime]::UtcNow -lt $echoDeadline) {
-                if ($lineQueue.TryDequeue([ref]$echoLine)) { break }
+                if ($lineQueue.TryDequeue([ref]$echoLine)) {
+                    # Got a line — is it a stale prompt or the actual command echo?
+                    $strippedEcho = $echoLine -replace '\x1b\[[0-9;]*[a-zA-Z]', '' -replace '\x1b\][^\x07]*\x07', ''
+                    if ($promptRegex.IsMatch($strippedEcho.TrimEnd())) {
+                        # Stale prompt — log it and keep draining.
+                        $stdOutBuilder.AppendLine($echoLine) | Out-Null
+                        $echoLine = ""
+                        continue
+                    }
+                    # Non-prompt line — this is the actual command echo. Stop draining.
+                    break
+                }
                 Start-Sleep -Milliseconds 20
             }
             $stdOutBuilder.AppendLine("$lastPrompt$echoLine") | Out-Null
