@@ -188,6 +188,11 @@ Default: `$true`
 Enable or disable JSON file output. When `$false`, no session or per-device `.json` files
 are written. Default: `$false`
 
+**JsonSessionFileEnabled** `[bool]`
+Enable or disable the session summary JSON file (`ssh-session-<timestamp>.json`).
+When `$false`, per-device JSON files are still written if `JsonEnabled` is `$true`, but the
+session summary file is skipped. Default: `$true`
+
 **NetcortexEnabled** `[bool]`
 Enable or disable Netcortex raw output text files. When `$false`, no `.txt` files are
 written to `NetcortexDirectory`. Default: `$false`

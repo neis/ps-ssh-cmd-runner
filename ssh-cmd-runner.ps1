@@ -82,6 +82,11 @@
     Enable or disable JSON output files. When $false, no session or per-device .json files
     are written to JsonDirectory. Default is $false.
 
+.PARAMETER JsonSessionFileEnabled
+    Enable or disable the session summary JSON file (ssh-session-<timestamp>.json).
+    When $false, per-device JSON files are still written if JsonEnabled is $true, but the
+    session summary file is skipped. Default is $true.
+
 .PARAMETER NetcortexEnabled
     Enable or disable Netcortex raw output text files. When $false, no .txt files are written
     to NetcortexDirectory. Default is $false.
@@ -193,6 +198,9 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Enable or disable JSON output files (default: false)")]
     [bool]$JsonEnabled = $false,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Enable or disable session summary JSON file (default: true)")]
+    [bool]$JsonSessionFileEnabled = $true,
+
     [Parameter(Mandatory = $false, HelpMessage = "Enable or disable Netcortex raw output files (default: false)")]
     [bool]$NetcortexEnabled = $false,
 
@@ -235,7 +243,7 @@ if (Test-Path $configPath -PathType Leaf) {
         'DeviceListFile', 'CommandsDirectory', 'LogDirectory', 'TimeoutSeconds',
         'ExtraSSHOptions', 'CommandDelayMs', 'CommandTimeoutSeconds', 'InitialPromptTimeoutSeconds',
         'AllocatePTY', 'PingTest',
-        'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'NetcortexEnabled',
+        'JsonDirectory', 'NetcortexDirectory', 'LogEnabled', 'JsonEnabled', 'JsonSessionFileEnabled', 'NetcortexEnabled',
         'CredentialLabel', 'ClearCredentials',
         'CompressOutput', 'CompressWhen', 'DeleteAfterCompress'
     )
@@ -258,8 +266,9 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('JsonDirectory'))         { $JsonDirectory         = $config.JsonDirectory }
     if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory'))        { $NetcortexDirectory        = $config.NetcortexDirectory }
     if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
-    if (-not $PSBoundParameters.ContainsKey('JsonEnabled'))           { $JsonEnabled           = [bool]$config.JsonEnabled }
-    if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled'))   { $NetcortexEnabled   = [bool]$config.NetcortexEnabled }
+    if (-not $PSBoundParameters.ContainsKey('JsonEnabled'))              { $JsonEnabled              = [bool]$config.JsonEnabled }
+    if (-not $PSBoundParameters.ContainsKey('JsonSessionFileEnabled')) { $JsonSessionFileEnabled = [bool]$config.JsonSessionFileEnabled }
+    if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled'))       { $NetcortexEnabled       = [bool]$config.NetcortexEnabled }
     if (-not $PSBoundParameters.ContainsKey('CredentialLabel'))   { $CredentialLabel    = $config.CredentialLabel }
     if (-not $PSBoundParameters.ContainsKey('ClearCredentials'))  { $ClearCredentials   = [bool]$config.ClearCredentials }
     if (-not $PSBoundParameters.ContainsKey('CompressOutput'))       { $CompressOutput       = [bool]$config.CompressOutput }
@@ -1711,33 +1720,35 @@ if ($NetcortexEnabled) {
 # JSON OUTPUT
 # ---------------------------------------------
 if ($JsonEnabled) {
-    # --- Session summary file ---
-    $sessionDoc = [ordered]@{
-        platform = $osPlatform
-        engine   = $psEngine
-        date     = $runDate
-        result   = [ordered]@{
-            total   = $results.Count
-            success = $successResults.Count
-            failed  = $failedIPs.Count
+    # --- Session summary file (optional) ---
+    if ($JsonSessionFileEnabled) {
+        $sessionDoc = [ordered]@{
+            platform = $osPlatform
+            engine   = $psEngine
+            date     = $runDate
+            result   = [ordered]@{
+                total   = $results.Count
+                success = $successResults.Count
+                failed  = $failedIPs.Count
+            }
+            devices  = [ordered]@{
+                count               = $results.Count
+                ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
+                failed_ip_addresses = @($failedIPs)
+            }
+            commands_directory = $CommandsDirectory
+            os_types = [ordered]@{}
         }
-        devices  = [ordered]@{
-            count               = $results.Count
-            ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
-            failed_ip_addresses = @($failedIPs)
+        foreach ($osKey in $uniqueOSTypes) {
+            $sessionDoc.os_types[$osKey] = [ordered]@{
+                device_count = @($devices | Where-Object { $_.OS -eq $osKey }).Count
+                command_count = $commandsByOS[$osKey].Count
+                commands = @($commandsByOS[$osKey])
+            }
         }
-        commands_directory = $CommandsDirectory
-        os_types = [ordered]@{}
+        $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
+        $sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
     }
-    foreach ($osKey in $uniqueOSTypes) {
-        $sessionDoc.os_types[$osKey] = [ordered]@{
-            device_count = @($devices | Where-Object { $_.OS -eq $osKey }).Count
-            command_count = $commandsByOS[$osKey].Count
-            commands = @($commandsByOS[$osKey])
-        }
-    }
-    $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
-    $sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
 
     # --- Per-device JSON files (successful connections only) ---
     foreach ($r in $successResults) {

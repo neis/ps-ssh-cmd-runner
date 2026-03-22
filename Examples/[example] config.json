@@ -13,6 +13,7 @@
     "NetcortexDirectory": "./netcortex",
     "LogEnabled": true,
     "JsonEnabled": false,
+    "JsonSessionFileEnabled": true,
     "NetcortexEnabled": false,
     "CredentialLabel": "SSH-CMD-Runner",
     "ClearCredentials": false,
