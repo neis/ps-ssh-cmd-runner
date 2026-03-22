@@ -1,8 +1,12 @@
 # Cisco WLC AireOS commands (paging disabled automatically via "config paging disable")
 show sysinfo
 show inventory
-show interface summary
-show wlan summary
 show ap summary
+show cdp neighbors detail
+show wlan summary
+show redundancy detail
+show interface summary
+show port summary
+show flexconnect group summary
 show client summary
-show run-config
+show run

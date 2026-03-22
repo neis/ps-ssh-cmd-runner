@@ -2,8 +2,14 @@
 show startup-config | include hostname
 show version
 show inventory
-show ip interface brief
-show wlan summary
-show ap summary
+show chassis
 show wireless client summary
+show cdp neighbors detail
+show lldp neighbors detail
+show ap summary
+show ap cdp neighbors
+show wlan summary
+show interface
+show wireless tag policy summary
+show etherchannel summary
 show run

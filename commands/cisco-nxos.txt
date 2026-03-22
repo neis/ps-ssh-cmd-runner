@@ -1,14 +1,18 @@
 # Cisco NX-OS commands (paging disabled automatically via "terminal length 0")
-show startup-config | include hostname|switchname
-show cdp neighbors detail
 show version
 show inventory
 show interface
 show interface status
-show vlan
-show ip route
-show logging last 500
-show spanning-tree detail
+show cdp neighbors detail
+show lldp neighbors detail
+show ip route vrf all
 show mac address-table
-show ip arp
-show run
+show ip arp detail vrf all
+show port-channel summary
+show interfaces transceiver details
+show ip ospf neighbor
+show ip ospf interface brief
+show ip eigrp neighbors
+show ip bgp summary
+show ip bfp neighbors
+show running-config
