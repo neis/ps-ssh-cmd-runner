@@ -1204,30 +1204,39 @@ function Invoke-SSHSession {
             # the prompt slightly before their output buffer is fully flushed.
             if ($CmdDelayMs -gt 0) { Start-Sleep -Milliseconds $CmdDelayMs }
 
+            # Drain stale prompt lines from the queue BEFORE sending the command.
+            # WLC AireOS (and some other devices) echo the prompt multiple times
+            # after the previous command completes. These stale prompts arrive
+            # after Read-UntilPrompt matched the first prompt and returned.
+            # If not drained, Read-UntilPrompt matches one as the "end of command"
+            # prompt and returns before any real output arrives, causing output to
+            # cascade into the next command's JSON section.
+            # The drain must happen BEFORE the command is sent, otherwise the stale
+            # prompts race with the command echo and can't be distinguished.
+            $drainLine = ""
+            while ($lineQueue.TryDequeue([ref]$drainLine)) {
+                if ($null -eq $drainLine) { break }   # don't consume the EOS sentinel
+                $strippedDrain = $drainLine -replace '\x1b\[[0-9;]*[a-zA-Z]', '' -replace '\x1b\][^\x07]*\x07', ''
+                if ($promptRegex.IsMatch($strippedDrain.TrimEnd())) {
+                    $stdOutBuilder.AppendLine($drainLine) | Out-Null
+                }
+                else {
+                    # Non-prompt content — shouldn't happen between commands, but
+                    # log it so it isn't silently lost.
+                    $stdOutBuilder.AppendLine($drainLine) | Out-Null
+                }
+            }
+
             $proc.StandardInput.WriteLine($cmd)
             $proc.StandardInput.Flush()
 
-            # Drain stale prompt lines from the queue before looking for the echo.
-            # WLC AireOS (and some other devices) echo the prompt multiple times
-            # after paging commands or newline nudges. If these stale prompts are
-            # left in the queue, Read-UntilPrompt matches one as the "end of command"
-            # prompt and returns before any real output arrives, causing output to
-            # cascade into the next command's section.
+            # Dequeue the command echo. Cisco devices echo the command back as the
+            # first line of output. Join it with the held prompt to produce the
+            # natural "hostname#show inventory" layout seen in a live session.
             $echoLine = ""
             $echoDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
             while ([DateTime]::UtcNow -lt $echoDeadline) {
-                if ($lineQueue.TryDequeue([ref]$echoLine)) {
-                    # Got a line — is it a stale prompt or the actual command echo?
-                    $strippedEcho = $echoLine -replace '\x1b\[[0-9;]*[a-zA-Z]', '' -replace '\x1b\][^\x07]*\x07', ''
-                    if ($promptRegex.IsMatch($strippedEcho.TrimEnd())) {
-                        # Stale prompt — log it and keep draining.
-                        $stdOutBuilder.AppendLine($echoLine) | Out-Null
-                        $echoLine = ""
-                        continue
-                    }
-                    # Non-prompt line — this is the actual command echo. Stop draining.
-                    break
-                }
+                if ($lineQueue.TryDequeue([ref]$echoLine)) { break }
                 Start-Sleep -Milliseconds 20
             }
             $stdOutBuilder.AppendLine("$lastPrompt$echoLine") | Out-Null
