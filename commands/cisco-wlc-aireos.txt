@@ -4,6 +4,7 @@ show inventory
 show ap summary
 show cdp neighbors detail
 show wlan summary
+show redundancy summary
 show redundancy detail
 show interface summary
 show port summary

@@ -3,6 +3,8 @@ show startup-config | include hostname
 show version
 show inventory
 show chassis
+show redundancy
+show wireless summary
 show wireless client summary
 show cdp neighbors detail
 show lldp neighbors detail
