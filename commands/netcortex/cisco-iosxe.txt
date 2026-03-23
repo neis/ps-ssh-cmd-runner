@@ -1,0 +1,5 @@
+# Netcortex command list for Cisco IOS / IOS-XE devices
+# Commands are included in Netcortex output in the order listed here.
+# Commands not in this file are excluded from Netcortex output (but still
+# appear in log and JSON outputs if present in the standard command file).
+# Paging is disabled automatically — do not include "terminal length 0".

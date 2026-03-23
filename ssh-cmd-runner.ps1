@@ -403,6 +403,43 @@ if (-not $CompressOnly) {
         $commandsByOS[$osType] = $cmds
     }
 
+    # Load optional per-OS Netcortex command files. These define which commands
+    # appear in Netcortex output and in what order. Commands in the Netcortex list
+    # that are missing from the standard list are appended to the session command
+    # list so they're actually executed during the SSH session.
+    $netcortexCommandsByOS = @{}
+    if ($NetcortexEnabled) {
+        $netcortexDir = Join-Path $CommandsDirectory "netcortex"
+        foreach ($osType in $uniqueOSTypes) {
+            $ncFile = Join-Path $netcortexDir "$osType.txt"
+            if (Test-Path $ncFile -PathType Leaf) {
+                $ncCmds = Get-Content $ncFile |
+                    ForEach-Object { $_.Trim() } |
+                    Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
+                if ($ncCmds.Count -gt 0) {
+                    $netcortexCommandsByOS[$osType] = $ncCmds
+                }
+            }
+        }
+
+        # Merge Netcortex-only commands into the standard command list.
+        # Standard commands keep their original order; Netcortex commands
+        # not already present are appended at the end.
+        foreach ($osType in @($netcortexCommandsByOS.Keys)) {
+            $stdCmds = $commandsByOS[$osType]
+            $stdSet  = [System.Collections.Generic.HashSet[string]]::new(
+                [string[]]$stdCmds,
+                [System.StringComparer]::OrdinalIgnoreCase
+            )
+            $additions = @($netcortexCommandsByOS[$osType] | Where-Object {
+                -not $stdSet.Contains($_)
+            })
+            if ($additions.Count -gt 0) {
+                $commandsByOS[$osType] = @($stdCmds) + $additions
+            }
+        }
+    }
+
     # Pre-flight check: cisco-wlc-aireos devices require "show sysinfo" in their
     # command file to extract the device hostname. The WLC prompt does not reliably
     # contain the hostname, so the System Name field from this command is the only
@@ -1694,17 +1731,45 @@ $failedIPs      = @($results | Where-Object { $_.Status -eq "Failed" } | ForEach
 # NETCORTEX OUTPUT
 # ---------------------------------------------
 if ($NetcortexEnabled) {
+    # Map each device IP to its OS type for Netcortex command list lookup
+    $deviceOSMap = @{}
+    foreach ($d in $devices) { $deviceOSMap[$d.IP] = $d.OS }
+
     foreach ($r in $successResults) {
         $safeDevice = ConvertTo-SafeFileName $r.DeviceName
         $safeIP = ConvertTo-SafeFileName $r.IPAddress
         $netcortexFile = Join-Path $NetcortexDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
+
+        # Determine whether this OS has a dedicated Netcortex command list.
+        # If so, filter and reorder results to match the Netcortex file's ordering.
+        # If not, fall back to all commands in execution order (original behavior).
+        $deviceOS = $deviceOSMap[$r.IPAddress]
+        $ncCmds = if ($deviceOS -and $netcortexCommandsByOS.ContainsKey($deviceOS)) {
+            $netcortexCommandsByOS[$deviceOS]
+        } else { $null }
+
+        if ($ncCmds) {
+            # Build case-insensitive lookup from command string -> CommandResult
+            $crLookup = @{}
+            foreach ($cr in $r.CommandResults) {
+                $crLookup[$cr.command.ToLower()] = $cr
+            }
+            # Select results in Netcortex file order, including only listed commands
+            $orderedResults = foreach ($cmd in $ncCmds) {
+                $key = $cmd.ToLower()
+                if ($crLookup.ContainsKey($key)) { $crLookup[$key] }
+            }
+        }
+        else {
+            $orderedResults = $r.CommandResults
+        }
 
         # Build netcortex content: prompt+command echo, raw output, bare prompt separator.
         # Trailing blank lines are stripped from each command's output so the bare
         # prompt lands immediately after the last non-empty output line — giving the
         # downstream ingest a clean prompt-delimited structure with no ambiguous blanks.
         $netcortexLines = [System.Collections.Generic.List[string]]::new()
-        foreach ($cr in $r.CommandResults) {
+        foreach ($cr in $orderedResults) {
             $netcortexLines.Add("$($cr.prompt)$($cr.command)")
             $outLines = @($cr.raw_output)
             $trimIdx = $outLines.Count - 1

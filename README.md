@@ -268,6 +268,34 @@ show ap summary
 show run-config
 ```
 
+### Netcortex Command Files (optional)
+
+When `NetcortexEnabled` is `$true`, the script looks for an optional `netcortex/` subdirectory
+inside the commands directory. These files define which commands appear in Netcortex output
+and in what order.
+
+```
+commands/
+  cisco-iosxe.txt              ← standard commands (log, JSON, all outputs)
+  cisco-nxos.txt
+  netcortex/
+    cisco-iosxe.txt            ← Netcortex-specific list (subset + ordering)
+    cisco-nxos.txt
+```
+
+**How merging works:** Commands from the Netcortex file that are not already in the standard
+command file are automatically appended to the session command list. This ensures every
+command Netcortex needs is actually executed during the SSH session, without duplicating
+commands that are already in the standard list.
+
+**How filtering works:** When generating Netcortex `.txt` output files, only commands listed
+in the Netcortex command file are included, and they appear in the order defined in that
+file — regardless of the order they were executed. Log and JSON outputs are unaffected
+and continue to include all commands.
+
+**Fallback:** If no Netcortex command file exists for an OS type, the Netcortex output
+includes all commands in execution order (the original behavior).
+
 ## OUTPUT FILES
 
 ### Log Files
