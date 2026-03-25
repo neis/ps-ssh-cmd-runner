@@ -1,0 +1,14 @@
+# Cisco IOS-XR commands (ASR9000, NCS, CRS)
+# Paging disabled automatically via "terminal length 0"
+show version
+show inventory
+show interfaces description
+show ipv4 interface brief
+show bgp summary
+show route summary
+show cdp neighbors detail
+show running-config
+show platform
+show redundancy summary
+show environment
+show logging last 100

@@ -297,6 +297,7 @@ $thinSep = ("-" * 40)
 #                       (some devices wait for a keystroke before displaying the prompt)
 $validOSTypes = @{
     'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-iosxr'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
     'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';     RequirePTY = $true;  ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
     'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$'; SendInitialNewline = $true }
     'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
@@ -669,6 +670,11 @@ function Get-HostnameFromPrompt {
         $trimmed = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
 
+        # Cisco IOS-XR style: RP/0/RSP0/CPU0:hostname# or RP/0/RP0/CPU0:hostname(config)#
+        if ($trimmed -match '^[A-Za-z]+(?:/[A-Za-z0-9]+)+:([A-Za-z0-9][A-Za-z0-9._-]*)(?:\([A-Za-z0-9/_-]*\))?[#>]') {
+            return $Matches[1]
+        }
+
         # Juniper / PAN style: user@hostname> or user@hostname# or user@hostname:~$
         if ($trimmed -match '^\S*?@([A-Za-z0-9_-]+)[>#:\$%]') {
             return $Matches[1]
@@ -1014,7 +1020,7 @@ function Invoke-SSHSession {
         # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
         # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
         $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([^)]+\)\s*>)',
+            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([^)]+\)\s*>)|(?:^[A-Za-z]+(?:/[A-Za-z0-9]+)+:[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])',
             [System.Text.RegularExpressions.RegexOptions]::Compiled
         )
         # Compiled interactive prompt regex for auto-responding to mid-command prompts.
@@ -1046,7 +1052,7 @@ function Invoke-SSHSession {
         # The outer scope overwrites these; the runspace reads them on every character.
         # String reference assignment is atomic in .NET.
         $regexHolder = [string[]]::new(3)
-        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>)\s*$'
+        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>|^[A-Za-z]+(?:/[A-Za-z0-9]+)+:[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$'
         $regexHolder[1] = $InteractivePattern   # populated per-OS if interactive prompts are needed
         $regexHolder[2] = '^\s*:\s*$'           # bare ":" pager prompt (more/less)
 
@@ -1206,11 +1212,11 @@ function Invoke-SSHSession {
             # the tighter pattern on its next character iteration.
             # Always include the broad WLC pattern — hostname can't be extracted from
             # WLC prompts, so the parenthesized pattern stays broad throughout the session.
-            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>)\s*`$"
+            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>|^[A-Za-z]+(?:/[A-Za-z0-9]+)+:$hn(?:\([A-Za-z0-9/_-]*\))?[#>])\s*`$"
 
             # Replace the compiled Regex used by Read-UntilPrompt for all subsequent calls.
             $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)|(?:^\([^)]+\)\s*>)",
+                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)|(?:^\([^)]+\)\s*>)|(?:^[A-Za-z]+(?:/[A-Za-z0-9]+)+:$hn(?:\([A-Za-z0-9/_-]*\))?[#>])",
                 [System.Text.RegularExpressions.RegexOptions]::Compiled
             )
         }

@@ -66,7 +66,8 @@ Each OS type defines automatic behaviors for paging, PTY allocation, and session
 | OS Type            | Platform                              | Paging Command          | PTY    | Exit Sequence     |
 | ------------------ | ------------------------------------- | ----------------------- | ------ | ----------------- |
 | `cisco-iosxe`      | Cisco IOS / IOS-XE (Catalyst, ISR)    | `terminal length 0`     | Auto   | `exit`            |
-| `cisco-nxos`       | Cisco NX-OS (Nexus 5K/7K/9K)     | `terminal length 0`     | Always | `exit`            |
+| `cisco-iosxr`      | Cisco IOS-XR (ASR9000, NCS, CRS)      | `terminal length 0`     | Auto   | `exit`            |
+| `cisco-nxos`       | Cisco NX-OS (Nexus 5K/7K/9K)          | `terminal length 0`     | Always | `exit`            |
 | `cisco-wlc-aireos` | Cisco WLC AireOS (5520, etc.)    | `config paging disable` | Always | `logout` then `n` |
 | `cisco-wlc-iosxe`  | Cisco WLC IOS-XE (Catalyst 9800) | `terminal length 0`     | Auto   | `exit`            |
 
@@ -509,6 +510,7 @@ parsing the device hostname from output:
 | Vendor / OS        | Example prompt                          |
 | ------------------ | --------------------------------------- |
 | Cisco IOS / IOS-XE | `hostname#` `hostname>`                 |
+| Cisco IOS-XR       | `RP/0/RSP0/CPU0:hostname#`              |
 | Cisco NX-OS        | `hostname#` `hostname(config)#`         |
 | Cisco WLC AireOS   | `(Cisco Controller) >`                  |
 | Arista EOS         | `hostname#` `hostname>`                 |
