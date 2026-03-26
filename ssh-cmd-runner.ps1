@@ -281,6 +281,13 @@ if (Test-Path $configPath -PathType Leaf) {
 # ---------------------------------------------
 $ErrorActionPreference = "Stop"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+# Start a runtime transcript to capture all console output.
+# Survives force-closed PowerShell windows — the transcript is flushed incrementally.
+$runtimeLogDir = Join-Path $PSScriptRoot "runtime-logs"
+if (-not (Test-Path $runtimeLogDir)) { New-Item -ItemType Directory -Path $runtimeLogDir -Force | Out-Null }
+$transcriptPath = Join-Path $runtimeLogDir "runtime-${timestamp}.log"
+try { Start-Transcript -Path $transcriptPath -Append | Out-Null } catch { Write-Verbose "Transcript not available: $($_.Exception.Message)" }
 $runDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $osPlatform = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription.Trim()
 $psEngine = "PowerShell $($PSVersionTable.PSVersion.ToString())"
@@ -1906,3 +1913,6 @@ catch {
 # Clear password from memory
 $password = $null
 [System.GC]::Collect()
+
+# Stop the runtime transcript
+try { Stop-Transcript | Out-Null } catch { }
