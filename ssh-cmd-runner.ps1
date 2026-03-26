@@ -228,7 +228,8 @@ param(
 # CONFIG FILE LOADING
 # Precedence: CLI args > config.json > param() defaults
 # ---------------------------------------------
-$configPath = Join-Path $PSScriptRoot "config.json"
+$_scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$configPath = Join-Path $_scriptRoot "config.json"
 
 if (Test-Path $configPath -PathType Leaf) {
     try {
@@ -284,7 +285,7 @@ $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 # Start a runtime transcript to capture all console output.
 # Survives force-closed PowerShell windows — the transcript is flushed incrementally.
-$runtimeLogDir = Join-Path $PSScriptRoot "runtime-logs"
+$runtimeLogDir = Join-Path $_scriptRoot "runtime-logs"
 if (-not (Test-Path $runtimeLogDir)) { New-Item -ItemType Directory -Path $runtimeLogDir -Force | Out-Null }
 $transcriptPath = Join-Path $runtimeLogDir "runtime-${timestamp}.log"
 try { Start-Transcript -Path $transcriptPath -Append | Out-Null } catch { Write-Verbose "Transcript not available: $($_.Exception.Message)" }
@@ -844,7 +845,7 @@ function Invoke-CompressOutput {
 
     $archiveTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $archiveName = "ssh-session-${archiveTimestamp}.zip"
-    $archivePath = Join-Path $PSScriptRoot $archiveName
+    $archivePath = Join-Path $_scriptRoot $archiveName
 
     # Filter to directories that exist and contain at least one file
     $dirsToArchive = @($OutputDirectories) |
@@ -863,7 +864,7 @@ function Invoke-CompressOutput {
     Write-Host "Compressing output directories ..." -ForegroundColor Cyan
 
     $archiveSuccess = $false
-    $tempDir = Join-Path $PSScriptRoot ".compress-temp-$archiveTimestamp"
+    $tempDir = Join-Path $_scriptRoot ".compress-temp-$archiveTimestamp"
     try {
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
