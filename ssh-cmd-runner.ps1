@@ -370,12 +370,20 @@ if (-not $CompressOnly) {
 
     # Validate OS values and filter blanks/comments
     $devices = @()
+    $lineNum = 1   # header is line 1; data starts at line 2
     foreach ($row in $devicesCsv) {
-        $ip = $row.IP.Trim()
-        $os = $row.OS.Trim().ToLower()
+        $lineNum++
+        $ip = if ($row.IP) { $row.IP.Trim() } else { "" }
+        $os = if ($row.OS) { $row.OS.Trim().ToLower() } else { "" }
         if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
+        if ([string]::IsNullOrWhiteSpace($os)) {
+            Write-Host "ERROR: Device '$ip' on line $lineNum of '$DeviceListFile' is missing the OS field." -ForegroundColor Red
+            Write-Host "  Each row must have the format: IP,OS  (e.g. 10.1.1.1,cisco-iosxe)" -ForegroundColor Red
+            exit 1
+        }
         if ($os -notin $validOSTypes.Keys) {
-            Write-Error "Unknown OS type '$os' for device $ip. Valid: $($validOSTypes.Keys -join ', ')"
+            Write-Host "ERROR: Unknown OS type '$os' for device '$ip' on line $lineNum of '$DeviceListFile'." -ForegroundColor Red
+            Write-Host "  Valid OS types: $($validOSTypes.Keys -join ', ')" -ForegroundColor Red
             exit 1
         }
         $devices += [PSCustomObject]@{ IP = $ip; OS = $os }
