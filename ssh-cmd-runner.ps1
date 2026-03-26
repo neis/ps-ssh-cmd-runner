@@ -248,7 +248,7 @@ if (Test-Path $configPath -PathType Leaf) {
         'CredentialLabel', 'ClearCredentials',
         'CompressOutput', 'CompressWhen', 'DeleteAfterCompress'
     )
-    $missingKeys = $requiredKeys | Where-Object { $config.PSObject.Properties.Name -notcontains $_ }
+    $missingKeys = @($requiredKeys | Where-Object { $config.PSObject.Properties.Name -notcontains $_ })
     if ($missingKeys.Count -gt 0) {
         Write-Host "ERROR: config.json is missing required parameter(s): $($missingKeys -join ', ')" -ForegroundColor Red
         exit 1
