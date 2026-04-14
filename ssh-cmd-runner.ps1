@@ -1874,7 +1874,7 @@ $numWidth = "$($devices.Count)".Length
 $maxIPLen = [Math]::Max(2, ($devices | ForEach-Object { $_.IP.Length } | Measure-Object -Maximum).Maximum)
 $maxOSLen = [Math]::Max(2, ($devices | ForEach-Object { $_.OS.Length } | Measure-Object -Maximum).Maximum)
 $numColW  = $numWidth * 2 + 1                          # "N/N" width
-$statusW  = 9                                           # "CANCELLED" = widest
+$statusW  = 9                                           # "Cancelled" = widest
 $timeW    = 6                                           # "999.99"
 $ESC      = $ESC_CHAR
 
@@ -1943,27 +1943,27 @@ function Write-DeviceResult {
     $hostFmt  = $hostname.PadRight($HostnameWidth)
     switch ($Result.Status) {
         "Success" {
-            Write-C -Text "OK".PadRight(9) -Color Green -NoNewline
+            Write-C -Text "Success".PadRight(9) -Color Green -NoNewline
             Write-C -Text " | $timeFmt | $hostFmt |" -Color DarkGray
         }
         "Skipped" {
-            Write-C -Text "SKIPPED".PadRight(9) -Color Orange -NoNewline
+            Write-C -Text "Skipped".PadRight(9) -Color Orange -NoNewline
             Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
         }
         "Cancelled" {
-            Write-C -Text "CANCELLED" -Color Yellow -NoNewline
+            Write-C -Text "Cancelled" -Color Yellow -NoNewline
             Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
         }
         "Failed" {
             $reason = if ($Result.AuthFailed) {
                 "Auth rejected ($($AuthRetryCount.Value) of $MaxAuthRetries)"
             } else { $Result.Error }
-            Write-C -Text "FAILED".PadRight(9) -Color Red -NoNewline
+            Write-C -Text "Failed".PadRight(9) -Color Red -NoNewline
             Write-C -Text " | $timeFmt | $hostFmt | " -Color DarkGray -NoNewline
             Write-C -Text "$reason" -Color DarkRed
         }
         default {
-            Write-C -Text "UNKNOWN".PadRight(9) -Color DarkGray -NoNewline
+            Write-C -Text "Unknown".PadRight(9) -Color DarkGray -NoNewline
             Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
         }
     }

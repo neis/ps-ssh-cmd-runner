@@ -324,11 +324,11 @@ as each device completes:
 ```
    # | IP              | OS               | Status    |   Time | Hostname         | Reason
 -----+-----------------+------------------+-----------+--------+------------------+--------
- 1/5 | 10.1.50.1       | cisco-iosxe      | OK        |  20.15 | s4500x-1         |
- 2/5 | 10.1.50.2       | cisco-iosxe      | OK        |  22.03 | s3850x-1         |
+ 1/5 | 10.1.50.1       | cisco-iosxe      | Success   |  20.15 | s4500x-1         |
+ 2/5 | 10.1.50.2       | cisco-iosxe      | Success   |  22.03 | s3850x-1         |
  3/5 | 10.1.50.3       | cisco-iosxe      |           |        |                  |
- 4/5 | 10.1.50.4       | cisco-nxos       | FAILED    |   0.00 |                  | Connection timed out
- 5/5 | 10.1.50.5       | cisco-iosxe      | SKIPPED   |   0.00 |                  | No ping response
+ 4/5 | 10.1.50.4       | cisco-nxos       | Failed    |   0.00 |                  | Connection timed out
+ 5/5 | 10.1.50.5       | cisco-iosxe      | Skipped   |   0.00 |                  | No ping response
 ```
 
 In sequential mode (`MaxParallelJobs = 1`), the original inline output format is used
@@ -716,7 +716,3 @@ Parallel execution with a wider hostname column for long device names:
 Update config.json with any new parameters added in recent script updates:
 
     .\ssh-cmd-runner.ps1 -UpdateConfig
-
-Interactively select which OS types to process from the device list:
-
-    .\ssh-cmd-runner.ps1 -DeviceMenu
