@@ -242,6 +242,12 @@ padding to keep the table aligned. Increase this value if your device hostnames 
 (e.g. `CORE-SWITCH-01-BUILDING-3`). Only affects parallel mode output formatting. Valid
 range: 8-64. Default: `16`
 
+**UpdateConfig** `[switch]`
+Compares your `config.json` against `Examples/[example] config.json` and adds any missing
+parameters with their default values. Existing settings are never modified or removed. Use
+this after updating the script to pick up new configuration options without manually editing
+your config file. The script prints a summary of added parameters and exits.
+
 ## PARALLEL EXECUTION
 
 When `MaxParallelJobs` is set to `2` or higher, the script processes multiple devices
@@ -645,3 +651,7 @@ Process up to 5 devices in parallel:
 Parallel execution with a wider hostname column for long device names:
 
     .\ssh-cmd-runner.ps1 -MaxParallelJobs 10 -HostnameColumnWidth 28
+
+Update config.json with any new parameters added in recent script updates:
+
+    .\ssh-cmd-runner.ps1 -UpdateConfig

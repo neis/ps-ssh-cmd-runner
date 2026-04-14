@@ -230,7 +230,10 @@ param(
 
     [Parameter(Mandatory = $false, HelpMessage = "Minimum column width for the Hostname column in parallel mode table output (default: 16)")]
     [ValidateRange(8, 64)]
-    [int]$HostnameColumnWidth = 16
+    [int]$HostnameColumnWidth = 16,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Add missing parameters to config.json using defaults from the example config, then exit")]
+    [switch]$UpdateConfig
 )
 
 # ---------------------------------------------
@@ -327,6 +330,76 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('HostnameColumnWidth') -and $config.PSObject.Properties.Name -contains 'HostnameColumnWidth') {
         $HostnameColumnWidth = [int]$config.HostnameColumnWidth
     }
+}
+
+# ---------------------------------------------
+# UPDATE CONFIG — compare user's config.json against example and backfill missing keys
+# ---------------------------------------------
+if ($UpdateConfig) {
+    $examplePath = Join-Path $_scriptRoot "Examples/[example] config.json"
+    Write-Host ""
+
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        Write-C "ERROR: config.json not found at '$configPath'." -Color Red
+        Write-C "  Copy the example config first:" -Color Red
+        Write-C "  Copy-Item '$examplePath' '$configPath'" -Color DarkGray
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $examplePath -PathType Leaf)) {
+        Write-C "ERROR: Example config not found at '$examplePath'." -Color Red
+        exit 1
+    }
+
+    try {
+        $userConfig    = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        $exampleConfig = Get-Content -LiteralPath $examplePath -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-C "ERROR: Could not parse config file(s): $($_.Exception.Message)" -Color Red
+        exit 1
+    }
+
+    $userKeys    = @($userConfig.PSObject.Properties.Name)
+    $exampleKeys = @($exampleConfig.PSObject.Properties.Name)
+    $missingKeys = @($exampleKeys | Where-Object { $userKeys -notcontains $_ })
+
+    if ($missingKeys.Count -eq 0) {
+        Write-C "config.json is up to date - no missing parameters." -Color Green
+        Write-Host ""
+        exit 0
+    }
+
+    Write-C "Updating config.json with missing parameters..." -Color Cyan
+    Write-Host ""
+
+    # Add missing keys to the user config object
+    foreach ($key in $missingKeys) {
+        $value = $exampleConfig.$key
+        $userConfig | Add-Member -NotePropertyName $key -NotePropertyValue $value
+    }
+
+    # Write updated config back to file
+    $userConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $configPath -Encoding UTF8
+
+    # Print summary table
+    $maxKeyLen = ($missingKeys | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    $maxKeyLen = [Math]::Max($maxKeyLen, 9)  # minimum width for "Parameter" header
+    $hdrParam = "Parameter".PadRight($maxKeyLen)
+
+    Write-C "  Added $($missingKeys.Count) parameter(s) from example config:" -Color Cyan
+    Write-Host ""
+    Write-C "  $hdrParam  Default Value" -Color DarkGray
+    Write-C "  $('-' * $maxKeyLen)  ----------------" -Color DarkGray
+    foreach ($key in $missingKeys) {
+        $value = $exampleConfig.$key
+        $valueStr = if ($value -is [System.Array]) { "[$($value -join ', ')]" } else { "$value" }
+        $paddedKey = $key.PadRight($maxKeyLen)
+        Write-C "  $paddedKey  $valueStr" -Color Gray
+    }
+    Write-Host ""
+    Write-C "  See README.md for details on new parameters." -Color DarkGray
+    Write-Host ""
+    exit 0
 }
 
 # ---------------------------------------------
