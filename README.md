@@ -63,13 +63,13 @@ See the `Examples/` directory for sample files.
 
 Each OS type defines automatic behaviors for paging, PTY allocation, and session teardown.
 
-| OS Type            | Platform                              | Paging Command          | PTY    | Exit Sequence     |
-| ------------------ | ------------------------------------- | ----------------------- | ------ | ----------------- |
-| `cisco-iosxe`      | Cisco IOS / IOS-XE (Catalyst, ISR)    | `terminal length 0`     | Auto   | `exit`            |
-| `cisco-iosxr`      | Cisco IOS-XR (ASR9000, NCS, CRS)      | `terminal length 0`     | Auto   | `exit`            |
-| `cisco-nxos`       | Cisco NX-OS (Nexus 5K/7K/9K)          | `terminal length 0`     | Always | `exit`            |
-| `cisco-wlc-aireos` | Cisco WLC AireOS (5520, etc.)    | `config paging disable` | Always | `logout` then `n` |
-| `cisco-wlc-iosxe`  | Cisco WLC IOS-XE (Catalyst 9800) | `terminal length 0`     | Auto   | `exit`            |
+| OS Type            | Platform                           | Paging Command          | PTY    | Exit Sequence     |
+| ------------------ | ---------------------------------- | ----------------------- | ------ | ----------------- |
+| `cisco-iosxe`      | Cisco IOS / IOS-XE (Catalyst, ISR) | `terminal length 0`     | Auto   | `exit`            |
+| `cisco-iosxr`      | Cisco IOS-XR (ASR9000, NCS, CRS)   | `terminal length 0`     | Auto   | `exit`            |
+| `cisco-nxos`       | Cisco NX-OS (Nexus 5K/7K/9K)       | `terminal length 0`     | Always | `exit`            |
+| `cisco-wlc-aireos` | Cisco WLC AireOS (5520, etc.)      | `config paging disable` | Always | `logout` then `n` |
+| `cisco-wlc-iosxe`  | Cisco WLC IOS-XE (Catalyst 9800)   | `terminal length 0`     | Auto   | `exit`            |
 
 **Paging Command** is sent silently after login and does not appear in log output.
 
@@ -569,7 +569,7 @@ Create or append to `~\.ssh\config`:
 ```
 # Legacy device support — re-enable algorithms disabled by modern OpenSSH
 Host 10.*
-    User nimda
+    User admin
     Port 22
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
