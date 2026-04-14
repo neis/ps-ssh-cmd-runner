@@ -117,31 +117,37 @@ Copy `[example] config.json` from the `Examples/` directory to `config.json` and
 
 ## PARAMETERS
 
-**DeviceListFile** `[string]`
+### DeviceListFile `[string]`
+
 Path to a CSV file with `IP,OS` columns (header row required). Each row specifies a device
 IP and its operating system type. See [Supported OS Types](#supported-os-types) for valid
 values. Blank rows and rows where the IP starts with `#` are ignored. Default: `.\devices.txt`
 
-**CommandsDirectory** `[string]`
+### CommandsDirectory `[string]`
+
 Directory containing per-OS command files. Each file must be named `<os-type>.txt`
 (e.g. `cisco-iosxe.txt`, `cisco-nxos.txt`) matching the OS column in the device CSV.
 Only files for OS types present in the device list are required. Default: `.\commands`
 
-**LogDirectory** `[string]`
+### LogDirectory `[string]`
+
 Directory where per-device `.log` files will be saved. Created automatically if it does not
 exist. Default: `.\logs`
 
-**TimeoutSeconds** `[int]`
+### TimeoutSeconds `[int]`
+
 SSH connection timeout in seconds applied to the initial handshake. Valid range: 5-120.
 Default: `10`
 
-**CommandDelayMs** `[int]`
+### CommandDelayMs `[int]`
+
 Delay in milliseconds to wait after receiving the device prompt before sending the next
 command. Useful for slower devices or commands that produce large output where the prompt
 may appear before the output buffer is fully flushed. Set to `0` for fastest operation.
 Valid range: 0-10000. Default: `100`
 
-**CommandTimeoutSeconds** `[int]`
+### CommandTimeoutSeconds `[int]`
+
 Maximum time in seconds to wait for the device to return its prompt after each command is
 sent. Covers device processing time plus transmission of all output lines. Increase this
 value for commands with large output (e.g. `show interface` on a chassis with many ports).
@@ -150,99 +156,118 @@ Valid range: 5-600. Default: `30`
 > Note: `-TimeoutSeconds` controls the initial SSH connection handshake only.
 > `-CommandTimeoutSeconds` governs the per-command wait.
 
-**InitialPromptTimeoutSeconds** `[int]`
+### InitialPromptTimeoutSeconds `[int]`
+
 Maximum time in seconds to wait for the first device prompt after login. This window covers
 the full SSH authentication sequence, any MOTD/banner output, and the appearance of the CLI
 prompt. Increase this value for devices that display long banners or authenticate slowly. This
 setting applies only to the initial connection; per-command response waits are governed by
 `CommandTimeoutSeconds`. Valid range: 5-300. Default: `60`
 
-**AllocatePTY** `[bool]`
+### AllocatePTY `[bool]`
+
 Force pseudo-terminal (PTY) allocation using `-tt` instead of `-T` for all devices. When
 `$false` (default), PTY allocation is determined per-device: OS types that require PTY
 (`cisco-nxos`, `cisco-wlc-aireos`) always use `-tt`, while other OS types start with `-T`
 and auto-detect PTY failures via `stty` error detection or zero-stdout fallback. Set to
 `$true` to force PTY for all devices regardless of OS type. Default: `$false`
 
-**PingTest** `[bool]`
+### PingTest `[bool]`
+
 Send a single ICMP ping to each device before attempting SSH. Devices that do not respond
 are skipped immediately, avoiding the full SSH connection timeout. Disable if your network
 blocks ICMP but allows SSH. Default: `$true`
 
-**ExtraSSHOptions** `[string[]]`
+### ExtraSSHOptions `[string[]]`
+
 Additional options passed directly to `ssh.exe`. Supply as an array of strings. Commonly
 used for legacy devices that require older key exchange or cipher algorithms. See
 [Legacy Device Support](#legacy-device-support) for details. Default: `[]`
 
-**JsonDirectory** `[string]`
+### JsonDirectory `[string]`
+
 Directory where JSON output files will be saved. Created automatically if it does not exist.
 Each run produces a timestamped session summary plus one per-device file for each successful
 connection. Default: `.\json`
 
-**NetcortexDirectory** `[string]`
+### NetcortexDirectory `[string]`
+
 Directory where per-device raw output text files will be saved. Created automatically if it
 does not exist. Each successful device session produces a `.txt` file using the naming
 convention `DeviceName_IPAddress_Timestamp.txt`. Default: `.\netcortex`
 
-**LogEnabled** `[bool]`
+### LogEnabled `[bool]`
+
 Enable or disable `.log` file output. When `$false`, no log files are written.
 Default: `$true`
 
-**JsonEnabled** `[bool]`
+### JsonEnabled `[bool]`
+
 Enable or disable JSON file output. When `$false`, no session or per-device `.json` files
 are written. Default: `$false`
 
-**JsonSessionFileEnabled** `[bool]`
+### JsonSessionFileEnabled `[bool]`
+
 Enable or disable the session summary JSON file (`ssh-session-<timestamp>.json`).
 When `$false`, per-device JSON files are still written if `JsonEnabled` is `$true`, but the
 session summary file is skipped. Default: `$true`
 
-**NetcortexEnabled** `[bool]`
+### NetcortexEnabled `[bool]`
+
 Enable or disable Netcortex raw output text files. When `$false`, no `.txt` files are
 written to `NetcortexDirectory`. Default: `$false`
 
-**CredentialLabel** `[string]`
+### CredentialLabel `[string]`
+
 The target name used to store and retrieve credentials in Windows Credential Manager.
 Allows different credential sets to be maintained for different environments.
 Default: `"SSH-CMD-Runner"`
 
-**ClearCredentials** `[bool]`
+### ClearCredentials `[bool]`
+
 When `$true`, deletes any stored credentials matching `CredentialLabel` before prompting
 for new ones. Use this after a password rotation to force re-entry. Default: `$false`
 
-**CompressOutput** `[bool]`
+### CompressOutput `[bool]`
+
 When `$true`, creates a timestamped `.zip` archive of all output directories at the end of
 the run using PowerShell's built-in `Compress-Archive`. Only directories that contain at
 least one file are included. Default: `$false`
 
-**CompressWhen** `[string]`
+### CompressWhen `[string]`
+
 Controls when the archive is created. `"Always"` archives regardless of device results.
 `"SuccessOnly"` skips compression if any device failed. Default: `"Always"`
 
-**DeleteAfterCompress** `[bool]`
+### DeleteAfterCompress `[bool]`
+
 When `$true`, removes the original output directories after the archive is successfully
 created. Has no effect if `CompressOutput` is `$false` or if archive creation fails.
 Default: `$false`
 
-**CompressOnly** `[switch]`
+### CompressOnly `[switch]`
+
 Compresses existing output directories and exits immediately without connecting to any
 devices. Useful for archiving output from a previous run. Ignores `CompressWhen` (always
 compresses). Respects `DeleteAfterCompress` and output directory paths.
 
-**MaxParallelJobs** `[int]`
+### MaxParallelJobs `[int]`
+
 Maximum number of devices to process concurrently. When set to `1` (default), devices are
 processed sequentially in the order listed in the device CSV. When set to `2` or higher,
 devices are dispatched to a RunspacePool and processed in parallel. See
 [Parallel Execution](#parallel-execution) for details. Valid range: 1-100. Default: `1`
 
-**HostnameColumnWidth** `[int]`
+### HostnameColumnWidth `[int]`
+
 Minimum column width for the Hostname column in the parallel mode table output. Since
 hostnames are not known until each device is connected, this setting controls the minimum
 padding to keep the table aligned. Increase this value if your device hostnames are long
 (e.g. `CORE-SWITCH-01-BUILDING-3`). Only affects parallel mode output formatting. Valid
 range: 8-64. Default: `16`
 
-**UpdateConfig** `[switch]`
+### UpdateConfig `[switch]`
+
 Compares your `config.json` against `Examples/[example] config.json` and adds any missing
 parameters with their default values. Existing settings are never modified or removed. Use
 this after updating the script to pick up new configuration options without manually editing
