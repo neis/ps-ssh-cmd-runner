@@ -103,12 +103,15 @@ Copy `[example] config.json` from the `Examples/` directory to `config.json` and
   "NetcortexDirectory": "./netcortex",
   "LogEnabled": true,
   "JsonEnabled": false,
+  "JsonSessionFileEnabled": true,
   "NetcortexEnabled": false,
   "CredentialLabel": "SSH-CMD-Runner",
   "ClearCredentials": false,
   "CompressOutput": false,
   "CompressWhen": "Always",
-  "DeleteAfterCompress": false
+  "DeleteAfterCompress": false,
+  "MaxParallelJobs": 1,
+  "HostnameColumnWidth": 16
 }
 ```
 
@@ -225,6 +228,69 @@ Default: `$false`
 Compresses existing output directories and exits immediately without connecting to any
 devices. Useful for archiving output from a previous run. Ignores `CompressWhen` (always
 compresses). Respects `DeleteAfterCompress` and output directory paths.
+
+**MaxParallelJobs** `[int]`
+Maximum number of devices to process concurrently. When set to `1` (default), devices are
+processed sequentially in the order listed in the device CSV. When set to `2` or higher,
+devices are dispatched to a RunspacePool and processed in parallel. See
+[Parallel Execution](#parallel-execution) for details. Valid range: 1-100. Default: `1`
+
+**HostnameColumnWidth** `[int]`
+Minimum column width for the Hostname column in the parallel mode table output. Since
+hostnames are not known until each device is connected, this setting controls the minimum
+padding to keep the table aligned. Increase this value if your device hostnames are long
+(e.g. `CORE-SWITCH-01-BUILDING-3`). Only affects parallel mode output formatting. Valid
+range: 8-64. Default: `16`
+
+## PARALLEL EXECUTION
+
+When `MaxParallelJobs` is set to `2` or higher, the script processes multiple devices
+concurrently using a PowerShell RunspacePool. This can significantly reduce total execution
+time for large device lists.
+
+### How It Works
+
+Devices are dispatched from an internal queue as parallel slots become available. The console
+displays a table that grows as devices are dispatched, with status columns updating in-place
+as each device completes:
+
+```
+   # | IP              | OS               | Status    |   Time | Hostname         | Reason
+-----+-----------------+------------------+-----------+--------+------------------+--------
+ 1/5 | 10.1.50.1       | cisco-iosxe      | OK        |  20.15 | s4500x-1         |
+ 2/5 | 10.1.50.2       | cisco-iosxe      | OK        |  22.03 | s3850x-1         |
+ 3/5 | 10.1.50.3       | cisco-iosxe      |           |        |                  |
+ 4/5 | 10.1.50.4       | cisco-nxos       | FAILED    |   0.00 |                  | Connection timed out
+ 5/5 | 10.1.50.5       | cisco-iosxe      | SKIPPED   |   0.00 |                  | No ping response
+```
+
+In sequential mode (`MaxParallelJobs = 1`), the original inline output format is used
+instead of the table.
+
+### Interrupt Handling (Ctrl+C)
+
+Pressing Ctrl+C during execution triggers a graceful shutdown in both modes:
+
+- **Sequential mode**: The current device session completes, then the script stops before
+  the next device and proceeds to the summary.
+- **Parallel mode**: All running SSH sessions are stopped, pending devices in the queue are
+  cancelled, and the table is updated with `CANCELLED` status for affected devices.
+
+In both cases, partial results are preserved and included in the summary report and any
+enabled output files.
+
+### Authentication Abort
+
+If three consecutive devices return authentication failures, the script aborts automatically.
+In parallel mode, all running jobs are cancelled and the device queue is drained. This
+prevents wasting time against many devices with incorrect credentials.
+
+### Resource Considerations
+
+Each parallel SSH session spawns an `ssh.exe` process with a background stdout reader. High
+values of `MaxParallelJobs` against large device lists will consume more system memory and
+network connections. Some network devices may also rate-limit concurrent SSH sessions from
+the same source IP. Start with a conservative value (e.g. `5`) and increase as needed.
 
 ## PER-OS COMMAND FILES
 
@@ -571,3 +637,11 @@ Archive existing output directories without running any device connections:
 Archive existing output and clean up the source directories:
 
     .\ssh-cmd-runner.ps1 -CompressOnly -DeleteAfterCompress $true
+
+Process up to 5 devices in parallel:
+
+    .\ssh-cmd-runner.ps1 -MaxParallelJobs 5
+
+Parallel execution with a wider hostname column for long device names:
+
+    .\ssh-cmd-runner.ps1 -MaxParallelJobs 10 -HostnameColumnWidth 28

@@ -69,7 +69,8 @@
     Default is .\json.
 
 .PARAMETER NetcortexDirectory
-    Directory where per-device raw output text files will be saved. Created automatically
+    Directo
+    ice raw output text files will be saved. Created automatically
     if it doesn't exist. Each successful device gets its own file using the naming
     convention: DeviceName_IPAddress_Timestamp.txt. Failed connections are skipped.
     Default is .\netcortex.
@@ -221,7 +222,15 @@ param(
     [bool]$DeleteAfterCompress = $false,
 
     [Parameter(Mandatory = $false, HelpMessage = "Compress existing output directories and exit without processing devices")]
-    [switch]$CompressOnly
+    [switch]$CompressOnly,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Maximum number of devices to process in parallel (default: 1 = sequential)")]
+    [ValidateRange(1, 100)]
+    [int]$MaxParallelJobs = 1,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Minimum column width for the Hostname column in parallel mode table output (default: 16)")]
+    [ValidateRange(8, 64)]
+    [int]$HostnameColumnWidth = 16
 )
 
 # ---------------------------------------------
@@ -231,12 +240,47 @@ param(
 $_scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $configPath = Join-Path $_scriptRoot "config.json"
 
+# ANSI 24-bit color codes for consistent rendering across modern terminals
+# (VS Code, Windows Terminal, conhost with VT support).
+$ESC_CHAR = [char]27
+$script:ANSI = @{
+    Red       = "${ESC_CHAR}[38;2;255;80;80m"
+    DarkRed   = "${ESC_CHAR}[38;2;180;60;60m"
+    Green     = "${ESC_CHAR}[38;2;80;255;80m"
+    Yellow    = "${ESC_CHAR}[38;2;255;255;80m"
+    Orange    = "${ESC_CHAR}[38;2;255;165;0m"
+    Cyan      = "${ESC_CHAR}[38;2;80;220;255m"
+    Gray      = "${ESC_CHAR}[38;2;176;176;176m"
+    DarkGray  = "${ESC_CHAR}[38;2;118;118;118m"
+    Reset     = "${ESC_CHAR}[0m"
+}
+
+# Helper: Write colored text using ANSI 24-bit codes via [Console]::Write.
+# -NoNewline omits the trailing newline (default: emit newline).
+function Write-C {
+    param(
+        [string]$Text,
+        [string]$Color = "",
+        [switch]$NoNewline
+    )
+    if ($Color -and $script:ANSI.ContainsKey($Color)) {
+        $c = $script:ANSI[$Color]
+        $r = $script:ANSI.Reset
+        if ($NoNewline) { [Console]::Write("${c}${Text}${r}") }
+        else            { [Console]::WriteLine("${c}${Text}${r}") }
+    }
+    else {
+        if ($NoNewline) { [Console]::Write($Text) }
+        else            { [Console]::WriteLine($Text) }
+    }
+}
+
 if (Test-Path $configPath -PathType Leaf) {
     try {
         $config = Get-Content $configPath -Raw | ConvertFrom-Json
     }
     catch {
-        Write-Host "ERROR: config.json could not be parsed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-C "ERROR: config.json could not be parsed: $($_.Exception.Message)" -Color Red
         exit 1
     }
 
@@ -250,31 +294,39 @@ if (Test-Path $configPath -PathType Leaf) {
     )
     $missingKeys = @($requiredKeys | Where-Object { $config.PSObject.Properties.Name -notcontains $_ })
     if ($missingKeys.Count -gt 0) {
-        Write-Host "ERROR: config.json is missing required parameter(s): $($missingKeys -join ', ')" -ForegroundColor Red
+        Write-C "ERROR: config.json is missing required parameter(s): $($missingKeys -join ', ')" -Color Red
         exit 1
     }
 
-    if (-not $PSBoundParameters.ContainsKey('DeviceListFile'))        { $DeviceListFile        = $config.DeviceListFile }
-    if (-not $PSBoundParameters.ContainsKey('CommandsDirectory'))     { $CommandsDirectory     = $config.CommandsDirectory }
-    if (-not $PSBoundParameters.ContainsKey('LogDirectory'))          { $LogDirectory          = $config.LogDirectory }
-    if (-not $PSBoundParameters.ContainsKey('TimeoutSeconds'))        { $TimeoutSeconds        = [int]$config.TimeoutSeconds }
-    if (-not $PSBoundParameters.ContainsKey('ExtraSSHOptions'))       { $ExtraSSHOptions       = [string[]]$config.ExtraSSHOptions }
-    if (-not $PSBoundParameters.ContainsKey('CommandDelayMs'))        { $CommandDelayMs        = [int]$config.CommandDelayMs }
-    if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds'))        { $CommandTimeoutSeconds        = [int]$config.CommandTimeoutSeconds }
+    if (-not $PSBoundParameters.ContainsKey('DeviceListFile')) { $DeviceListFile = $config.DeviceListFile }
+    if (-not $PSBoundParameters.ContainsKey('CommandsDirectory')) { $CommandsDirectory = $config.CommandsDirectory }
+    if (-not $PSBoundParameters.ContainsKey('LogDirectory')) { $LogDirectory = $config.LogDirectory }
+    if (-not $PSBoundParameters.ContainsKey('TimeoutSeconds')) { $TimeoutSeconds = [int]$config.TimeoutSeconds }
+    if (-not $PSBoundParameters.ContainsKey('ExtraSSHOptions')) { $ExtraSSHOptions = [string[]]$config.ExtraSSHOptions }
+    if (-not $PSBoundParameters.ContainsKey('CommandDelayMs')) { $CommandDelayMs = [int]$config.CommandDelayMs }
+    if (-not $PSBoundParameters.ContainsKey('CommandTimeoutSeconds')) { $CommandTimeoutSeconds = [int]$config.CommandTimeoutSeconds }
     if (-not $PSBoundParameters.ContainsKey('InitialPromptTimeoutSeconds')) { $InitialPromptTimeoutSeconds = [int]$config.InitialPromptTimeoutSeconds }
-    if (-not $PSBoundParameters.ContainsKey('AllocatePTY'))              { $AllocatePTY              = [bool]$config.AllocatePTY }
-    if (-not $PSBoundParameters.ContainsKey('PingTest'))                { $PingTest                = [bool]$config.PingTest }
-    if (-not $PSBoundParameters.ContainsKey('JsonDirectory'))         { $JsonDirectory         = $config.JsonDirectory }
-    if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory'))        { $NetcortexDirectory        = $config.NetcortexDirectory }
-    if (-not $PSBoundParameters.ContainsKey('LogEnabled'))            { $LogEnabled            = [bool]$config.LogEnabled }
-    if (-not $PSBoundParameters.ContainsKey('JsonEnabled'))              { $JsonEnabled              = [bool]$config.JsonEnabled }
+    if (-not $PSBoundParameters.ContainsKey('AllocatePTY')) { $AllocatePTY = [bool]$config.AllocatePTY }
+    if (-not $PSBoundParameters.ContainsKey('PingTest')) { $PingTest = [bool]$config.PingTest }
+    if (-not $PSBoundParameters.ContainsKey('JsonDirectory')) { $JsonDirectory = $config.JsonDirectory }
+    if (-not $PSBoundParameters.ContainsKey('NetcortexDirectory')) { $NetcortexDirectory = $config.NetcortexDirectory }
+    if (-not $PSBoundParameters.ContainsKey('LogEnabled')) { $LogEnabled = [bool]$config.LogEnabled }
+    if (-not $PSBoundParameters.ContainsKey('JsonEnabled')) { $JsonEnabled = [bool]$config.JsonEnabled }
     if (-not $PSBoundParameters.ContainsKey('JsonSessionFileEnabled')) { $JsonSessionFileEnabled = [bool]$config.JsonSessionFileEnabled }
-    if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled'))       { $NetcortexEnabled       = [bool]$config.NetcortexEnabled }
-    if (-not $PSBoundParameters.ContainsKey('CredentialLabel'))   { $CredentialLabel    = $config.CredentialLabel }
-    if (-not $PSBoundParameters.ContainsKey('ClearCredentials'))  { $ClearCredentials   = [bool]$config.ClearCredentials }
-    if (-not $PSBoundParameters.ContainsKey('CompressOutput'))       { $CompressOutput       = [bool]$config.CompressOutput }
-    if (-not $PSBoundParameters.ContainsKey('CompressWhen'))         { $CompressWhen         = $config.CompressWhen }
-    if (-not $PSBoundParameters.ContainsKey('DeleteAfterCompress'))  { $DeleteAfterCompress  = [bool]$config.DeleteAfterCompress }
+    if (-not $PSBoundParameters.ContainsKey('NetcortexEnabled')) { $NetcortexEnabled = [bool]$config.NetcortexEnabled }
+    if (-not $PSBoundParameters.ContainsKey('CredentialLabel')) { $CredentialLabel = $config.CredentialLabel }
+    if (-not $PSBoundParameters.ContainsKey('ClearCredentials')) { $ClearCredentials = [bool]$config.ClearCredentials }
+    if (-not $PSBoundParameters.ContainsKey('CompressOutput')) { $CompressOutput = [bool]$config.CompressOutput }
+    if (-not $PSBoundParameters.ContainsKey('CompressWhen')) { $CompressWhen = $config.CompressWhen }
+    if (-not $PSBoundParameters.ContainsKey('DeleteAfterCompress')) { $DeleteAfterCompress = [bool]$config.DeleteAfterCompress }
+
+    # Optional keys — not required in config.json for backward compatibility
+    if (-not $PSBoundParameters.ContainsKey('MaxParallelJobs') -and $config.PSObject.Properties.Name -contains 'MaxParallelJobs') {
+        $MaxParallelJobs = [int]$config.MaxParallelJobs
+    }
+    if (-not $PSBoundParameters.ContainsKey('HostnameColumnWidth') -and $config.PSObject.Properties.Name -contains 'HostnameColumnWidth') {
+        $HostnameColumnWidth = [int]$config.HostnameColumnWidth
+    }
 }
 
 # ---------------------------------------------
@@ -304,11 +356,11 @@ $thinSep = ("-" * 40)
 # SendInitialNewline  : send an empty line after SSH session starts to trigger the CLI prompt
 #                       (some devices wait for a keystroke before displaying the prompt)
 $validOSTypes = @{
-    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
-    'cisco-iosxr'      = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
-    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0';     RequirePTY = $true;  ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
-    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true;  ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$'; SendInitialNewline = $true }
-    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0';     RequirePTY = $false; ExitCommands = @('exit');        InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-iosxr'      = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0'; RequirePTY = $true; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true; ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$'; SendInitialNewline = $true }
+    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
 }
 
 # Validate input files exist (skip when only compressing)
@@ -348,8 +400,8 @@ if (-not $CompressOnly) {
     # Pre-filter comment lines (# prefix) and blank lines before CSV parsing
     # so that free-form comments don't break Import-Csv column expectations.
     $csvLines = @(Get-Content $DeviceListFile | Where-Object {
-        -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimStart().StartsWith('#')
-    })
+            -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimStart().StartsWith('#')
+        })
     if ($csvLines.Count -le 1) {
         # Need at least a header row + one data row
         Write-Error "No devices found in '$DeviceListFile'."
@@ -377,13 +429,13 @@ if (-not $CompressOnly) {
         $os = if ($row.OS) { $row.OS.Trim().ToLower() } else { "" }
         if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
         if ([string]::IsNullOrWhiteSpace($os)) {
-            Write-Host "ERROR: Device '$ip' on line $lineNum of '$DeviceListFile' is missing the OS field." -ForegroundColor Red
-            Write-Host "  Each row must have the format: IP,OS  (e.g. 10.1.1.1,cisco-iosxe)" -ForegroundColor Red
+            Write-C "ERROR: Device '$ip' on line $lineNum of '$DeviceListFile' is missing the OS field." -Color Red
+            Write-C "  Each row must have the format: IP,OS  (e.g. 10.1.1.1,cisco-iosxe)" -Color Red
             exit 1
         }
         if ($os -notin $validOSTypes.Keys) {
-            Write-Host "ERROR: Unknown OS type '$os' for device '$ip' on line $lineNum of '$DeviceListFile'." -ForegroundColor Red
-            Write-Host "  Valid OS types: $($validOSTypes.Keys -join ', ')" -ForegroundColor Red
+            Write-C "ERROR: Unknown OS type '$os' for device '$ip' on line $lineNum of '$DeviceListFile'." -Color Red
+            Write-C "  Valid OS types: $($validOSTypes.Keys -join ', ')" -Color Red
             exit 1
         }
         $devices += [PSCustomObject]@{ IP = $ip; OS = $os }
@@ -411,8 +463,8 @@ if (-not $CompressOnly) {
             exit 1
         }
         $cmds = Get-Content $cmdFile |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
         if ($cmds.Count -eq 0) {
             Write-Error "No valid commands found in '$cmdFile'."
             exit 1
@@ -431,8 +483,8 @@ if (-not $CompressOnly) {
             $ncFile = Join-Path $netcortexDir "$osType.txt"
             if (Test-Path $ncFile -PathType Leaf) {
                 $ncCmds = Get-Content $ncFile |
-                    ForEach-Object { $_.Trim() } |
-                    Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
                 if ($ncCmds.Count -gt 0) {
                     $netcortexCommandsByOS[$osType] = $ncCmds
                 }
@@ -444,13 +496,13 @@ if (-not $CompressOnly) {
         # not already present are appended at the end.
         foreach ($osType in @($netcortexCommandsByOS.Keys)) {
             $stdCmds = $commandsByOS[$osType]
-            $stdSet  = [System.Collections.Generic.HashSet[string]]::new(
+            $stdSet = [System.Collections.Generic.HashSet[string]]::new(
                 [string[]]$stdCmds,
                 [System.StringComparer]::OrdinalIgnoreCase
             )
             $additions = @($netcortexCommandsByOS[$osType] | Where-Object {
-                -not $stdSet.Contains($_)
-            })
+                    -not $stdSet.Contains($_)
+                })
             if ($additions.Count -gt 0) {
                 $commandsByOS[$osType] = @($stdCmds) + $additions
             }
@@ -466,24 +518,25 @@ if (-not $CompressOnly) {
         $hasSysinfo = $aireosCommands | Where-Object { $_ -match '^\s*show\s+sysinfo\s*$' }
         if (-not $hasSysinfo) {
             Write-Host ""
-            Write-Host "WARNING: cisco-wlc-aireos command file does not include 'show sysinfo'." -ForegroundColor Yellow
-            Write-Host "  WLC AireOS devices require this command to determine the device hostname." -ForegroundColor Yellow
-            Write-Host "  Without it, devices will be logged as 'unknown'." -ForegroundColor Yellow
+            Write-C "WARNING: cisco-wlc-aireos command file does not include 'show sysinfo'." -Color Yellow
+            Write-C "  WLC AireOS devices require this command to determine the device hostname." -Color Yellow
+            Write-C "  Without it, devices will be logged as 'unknown'." -Color Yellow
             Write-Host ""
-            Write-Host "  [S] Skip all cisco-wlc-aireos devices and continue" -ForegroundColor Cyan
-            Write-Host "  [A] Abort the run" -ForegroundColor Cyan
+            Write-C "  [S] Skip all cisco-wlc-aireos devices and continue" -Color Cyan
+            Write-C "  [A] Abort the run" -Color Cyan
             Write-Host ""
             $response = (Read-Host "  Choice (S/A)").ToUpper()
             if ($response -eq 'S') {
-                Write-Host "  Skipping all cisco-wlc-aireos devices." -ForegroundColor Yellow
+                Write-C "  Skipping all cisco-wlc-aireos devices." -Color Yellow
                 $devices = @($devices | Where-Object { $_.OS -ne 'cisco-wlc-aireos' })
                 $uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
                 if ($devices.Count -eq 0) {
-                    Write-Host "  No devices remaining after skipping. Exiting." -ForegroundColor Red
+                    Write-C "  No devices remaining after skipping. Exiting." -Color Red
                     exit 0
                 }
-            } else {
-                Write-Host "  Run aborted." -ForegroundColor Red
+            }
+            else {
+                Write-C "  Run aborted." -Color Red
                 exit 1
             }
         }
@@ -626,44 +679,44 @@ function Set-AskPassScript {
 # prompt and removes any stored entry before looking up new ones.
 # ---------------------------------------------
 if (-not $CompressOnly) {
-Write-Host ""
+    Write-Host ""
 
-if ($ClearCredentials) {
-    [CredentialManager]::DeleteCredential($CredentialLabel) | Out-Null
-    Write-Host "Stored credentials for '$CredentialLabel' cleared." -ForegroundColor Yellow
-}
-
-$storedUsername = [CredentialManager]::ReadUsername($CredentialLabel)
-$storedPassword = [CredentialManager]::ReadPassword($CredentialLabel)
-
-if ($storedUsername -and $null -ne $storedPassword -and -not $ClearCredentials) {
-    $username         = $storedUsername
-    $password         = $storedPassword
-    $credentialsSaved = $true   # already in Credential Manager — no re-save needed
-    Write-Host "Using stored credentials for '$username' (label: $CredentialLabel)." -ForegroundColor Cyan
-}
-else {
-    $credential = Get-Credential -Message "Enter SSH credentials for network devices"
-    if ($null -eq $credential) {
-        Write-Host "Credential prompt cancelled. Aborting." -ForegroundColor Red
-        exit 1
+    if ($ClearCredentials) {
+        [CredentialManager]::DeleteCredential($CredentialLabel) | Out-Null
+        Write-C "Stored credentials for '$CredentialLabel' cleared." -Color Yellow
     }
-    $username         = $credential.UserName
-    $password         = $credential.GetNetworkCredential().Password
-    $credentialsSaved = $false  # freshly entered — save after first verified success
-}
 
-# ---------------------------------------------
-# SSH_ASKPASS HELPER
-# Creates a temporary .cmd script that ssh.exe calls to retrieve the
-# password, avoiding interactive prompts per device. Set-AskPassScript
-# handles cmd.exe special-character escaping and is called again
-# whenever credentials are updated mid-run.
-# ---------------------------------------------
-$askPassDir    = Join-Path $env:TEMP "ssh_askpass_$timestamp"
-New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
-$askPassScript = Join-Path $askPassDir "askpass.cmd"
-Set-AskPassScript -ScriptPath $askPassScript -Password $password
+    $storedUsername = [CredentialManager]::ReadUsername($CredentialLabel)
+    $storedPassword = [CredentialManager]::ReadPassword($CredentialLabel)
+
+    if ($storedUsername -and $null -ne $storedPassword -and -not $ClearCredentials) {
+        $username = $storedUsername
+        $password = $storedPassword
+        $credentialsSaved = $true   # already in Credential Manager — no re-save needed
+        Write-C "Using stored credentials for '$username' (label: $CredentialLabel)." -Color Cyan
+    }
+    else {
+        $credential = Get-Credential -Message "Enter SSH credentials for network devices"
+        if ($null -eq $credential) {
+            Write-C "Credential prompt cancelled. Aborting." -Color Red
+            exit 1
+        }
+        $username = $credential.UserName
+        $password = $credential.GetNetworkCredential().Password
+        $credentialsSaved = $false  # freshly entered — save after first verified success
+    }
+
+    # ---------------------------------------------
+    # SSH_ASKPASS HELPER
+    # Creates a temporary .cmd script that ssh.exe calls to retrieve the
+    # password, avoiding interactive prompts per device. Set-AskPassScript
+    # handles cmd.exe special-character escaping and is called again
+    # whenever credentials are updated mid-run.
+    # ---------------------------------------------
+    $askPassDir = Join-Path $env:TEMP "ssh_askpass_$timestamp"
+    New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
+    $askPassScript = Join-Path $askPassDir "askpass.cmd"
+    Set-AskPassScript -ScriptPath $askPassScript -Password $password
 }   # end if (-not $CompressOnly) — credential management
 
 # ---------------------------------------------
@@ -857,19 +910,19 @@ function Invoke-CompressOutput {
 
     # Filter to directories that exist and contain at least one file
     $dirsToArchive = @($OutputDirectories) |
-        Where-Object {
-            (Test-Path $_ -PathType Container) -and
-            (Get-ChildItem -LiteralPath $_ -Recurse -File -ErrorAction SilentlyContinue |
-             Select-Object -First 1)
-        }
+    Where-Object {
+        (Test-Path $_ -PathType Container) -and
+        (Get-ChildItem -LiteralPath $_ -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1)
+    }
 
     Write-Host ""
     if ($dirsToArchive.Count -eq 0) {
-        Write-Host "Compression skipped: no output directories with files found on disk." -ForegroundColor Yellow
+        Write-C "Compression skipped: no output directories with files found on disk." -Color Yellow
         return
     }
 
-    Write-Host "Compressing output directories ..." -ForegroundColor Cyan
+    Write-C "Compressing output directories ..." -Color Cyan
 
     $archiveSuccess = $false
     $tempDir = Join-Path $_scriptRoot ".compress-temp-$archiveTimestamp"
@@ -881,7 +934,7 @@ function Invoke-CompressOutput {
             $leafName = (Get-Item $dir).Name
             $innerZip = Join-Path $tempDir "$leafName.zip"
             Compress-Archive -Path (Join-Path $dir '*') -DestinationPath $innerZip -Force
-            Write-Host "  Packed: $leafName.zip" -ForegroundColor Gray
+            Write-C "  Packed: $leafName.zip" -Color Gray
         }
 
         # Bundle individual zips into the final outer archive
@@ -889,7 +942,7 @@ function Invoke-CompressOutput {
         $archiveSuccess = (Test-Path $archivePath)
     }
     catch {
-        Write-Host "  ERROR: Compression failed - $($_.Exception.Message)" -ForegroundColor Red
+        Write-C "  ERROR: Compression failed - $($_.Exception.Message)" -Color Red
     }
     finally {
         # Always clean up the temp directory
@@ -899,14 +952,14 @@ function Invoke-CompressOutput {
     }
 
     if ($archiveSuccess) {
-        $archiveItem    = Get-Item $archivePath
+        $archiveItem = Get-Item $archivePath
         $archiveSizeStr = if ($archiveItem.Length -ge 1MB) {
             "{0:0.0} MB" -f ($archiveItem.Length / 1MB)
         }
         else {
             "{0:0.0} KB" -f ($archiveItem.Length / 1KB)
         }
-        Write-Host "  Archive: $archiveName ($archiveSizeStr)" -ForegroundColor Green
+        Write-C "  Archive: $archiveName ($archiveSizeStr)" -Color Green
 
         if ($Cleanup) {
             foreach ($dir in $dirsToArchive) {
@@ -918,11 +971,11 @@ function Invoke-CompressOutput {
                     Write-Warning "Could not remove '$dir': $($_.Exception.Message)"
                 }
             }
-            Write-Host "  Output directories removed." -ForegroundColor Gray
+            Write-C "  Output directories removed." -Color Gray
         }
     }
     else {
-        Write-Host "  WARNING: Archive creation failed. Output directories were not removed." -ForegroundColor Red
+        Write-C "  WARNING: Archive creation failed. Output directories were not removed." -Color Red
     }
 }
 
@@ -944,7 +997,11 @@ function Invoke-SSHSession {
         [string[]]$ExitCommands = @('exit'),
         [string]$OSType = "",
         [string]$InteractivePattern = "",
-        [bool]$SendInitialNewline = $false
+        [bool]$SendInitialNewline = $false,
+        [string]$AskPassScriptPath = "",
+        [string]$SessionTimestamp = "",
+        [string]$LogDirectoryPath = "",
+        [bool]$LogOutputEnabled = $true
     )
 
     $result = [PSCustomObject]@{
@@ -965,596 +1022,601 @@ function Invoke-SSHSession {
     # Retry loop: first attempt uses -T (unless AllocatePTY is true). If a stty error is
     # detected in stderr, the second attempt automatically retries with -tt (PTY allocated).
     for ($ptyAttempt = 0; $ptyAttempt -lt 2; $ptyAttempt++) {
-    $proc = $null
-    $readerRunspace = $null
-    $errEvent = $null
-    $stdOutBuilder = $null
-    $stdErrBuilder = $null
+        $proc = $null
+        $readerRunspace = $null
+        $errEvent = $null
+        $stdOutBuilder = $null
+        $stdErrBuilder = $null
 
-    try {
-        # Build ssh arguments
-        $ptyFlag = if ($usePTY) { "-tt" } else { "-T" }
-        $sshArgs = @(
-            "-v",
-            $ptyFlag,
-            "-o", "ConnectTimeout=$Timeout",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "BatchMode=no",
-            "-o", "LogLevel=ERROR"
-        )
+        try {
+            # Build ssh arguments
+            $ptyFlag = if ($usePTY) { "-tt" } else { "-T" }
+            $sshArgs = @(
+                "-v",
+                $ptyFlag,
+                "-o", "ConnectTimeout=$Timeout",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "BatchMode=no",
+                "-o", "LogLevel=ERROR"
+            )
 
-        # Append any extra SSH options (e.g. legacy KexAlgorithms, Ciphers, HostKeyAlgorithms)
-        if ($SSHOptions.Count -gt 0) {
-            $sshArgs += $SSHOptions
-        }
-
-        $sshArgs += @("-l", $User, $IPAddress)
-
-        # Configure process with SSH_ASKPASS for automated password entry
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "ssh.exe"
-        $psi.Arguments = $sshArgs -join " "
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.CreateNoWindow = $true
-        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-
-        # Set SSH_ASKPASS environment so ssh.exe uses our helper for the password
-        $psi.EnvironmentVariables["SSH_ASKPASS"] = $askPassScript
-        $psi.EnvironmentVariables["SSH_ASKPASS_REQUIRE"] = "force"
-        $psi.EnvironmentVariables["DISPLAY"] = "localhost:0"
-
-        $proc = [System.Diagnostics.Process]::new()
-        $proc.StartInfo = $psi
-
-        $stdOutBuilder = [System.Text.StringBuilder]::new()
-        $stdErrBuilder = [System.Text.StringBuilder]::new()
-
-        # Stderr stays on async events (SSH diagnostics — ordering doesn't matter)
-        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
-            if ($null -ne $EventArgs.Data) {
-                $Event.MessageData.AppendLine($EventArgs.Data)
+            # Append any extra SSH options (e.g. legacy KexAlgorithms, Ciphers, HostKeyAlgorithms)
+            if ($SSHOptions.Count -gt 0) {
+                $sshArgs += $SSHOptions
             }
-        } -MessageData $stdErrBuilder
 
-        $proc.Start()
-        $proc.BeginErrorReadLine()
+            $sshArgs += @("-l", $User, $IPAddress)
 
-        # Windows StreamWriter defaults to \r\n line endings. Cisco IOS treats the
-        # bare \r as a second Enter press on an empty line. Over multiple commands
-        # this causes IOS to close the session early. Force LF-only line endings
-        # to match what a Unix SSH client sends.
-        $proc.StandardInput.NewLine = "`n"
+            # Configure process with SSH_ASKPASS for automated password entry
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "ssh.exe"
+            $psi.Arguments = $sshArgs -join " "
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+            $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
 
-        # Stdout is read synchronously via a background runspace + ConcurrentQueue.
-        # This avoids the race condition where async OutputDataReceived events fire
-        # on a background thread while new commands are already being written to stdin,
-        # causing output lines to be recorded out of order.
-        # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
-        # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
-        $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-            '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([^)]+\)\s*>)|(?:^[A-Za-z]+(?:/[A-Za-z0-9]+)+:[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])',
-            [System.Text.RegularExpressions.RegexOptions]::Compiled
-        )
-        # Compiled interactive prompt regex for auto-responding to mid-command prompts.
-        # Only built when the OS type defines an InteractivePattern (e.g. WLC AireOS pagination).
-        $interactiveRegex = $null
-        if ($InteractivePattern -ne '') {
-            $interactiveRegex = [System.Text.RegularExpressions.Regex]::new(
-                $InteractivePattern,
+            # Set SSH_ASKPASS environment so ssh.exe uses our helper for the password
+            $psi.EnvironmentVariables["SSH_ASKPASS"] = $AskPassScriptPath
+            $psi.EnvironmentVariables["SSH_ASKPASS_REQUIRE"] = "force"
+            $psi.EnvironmentVariables["DISPLAY"] = "localhost:0"
+
+            $proc = [System.Diagnostics.Process]::new()
+            $proc.StartInfo = $psi
+
+            $stdOutBuilder = [System.Text.StringBuilder]::new()
+            $stdErrBuilder = [System.Text.StringBuilder]::new()
+
+            # Stderr stays on async events (SSH diagnostics — ordering doesn't matter)
+            $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+                if ($null -ne $EventArgs.Data) {
+                    $Event.MessageData.AppendLine($EventArgs.Data)
+                }
+            } -MessageData $stdErrBuilder
+
+            $null = $proc.Start()
+            $proc.BeginErrorReadLine()
+
+            # Windows StreamWriter defaults to \r\n line endings. Cisco IOS treats the
+            # bare \r as a second Enter press on an empty line. Over multiple commands
+            # this causes IOS to close the session early. Force LF-only line endings
+            # to match what a Unix SSH client sends.
+            $proc.StandardInput.NewLine = "`n"
+
+            # Stdout is read synchronously via a background runspace + ConcurrentQueue.
+            # This avoids the race condition where async OutputDataReceived events fire
+            # on a background thread while new commands are already being written to stdin,
+            # causing output lines to be recorded out of order.
+            # A FileStream pipe on Windows does not expose DataAvailable, so a dedicated
+            # runspace calling ReadLine() in a loop is the reliable cross-platform approach.
+            $promptRegex = [System.Text.RegularExpressions.Regex]::new(
+                '(?:^\S*?@[A-Za-z0-9_-]+[>#:\$%])|(?:^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]\s*$)|(?:^\[?\S+?@[A-Za-z0-9_-]+\s)|(?:^\([^)]+\)\s*>)|(?:^[A-Za-z]+(?:/[A-Za-z0-9]+)+:[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])',
                 [System.Text.RegularExpressions.RegexOptions]::Compiled
             )
-        }
-        # Compiled pager prompt regex — detects bare ":" from more/less pager in login banners.
-        # When matched during initial prompt wait, sends a Space keypress to page through.
-        $pagerRegex = [System.Text.RegularExpressions.Regex]::new(
-            '^\s*:\s*$',
-            [System.Text.RegularExpressions.RegexOptions]::Compiled
-        )
-        # Cisco IOS sends the prompt without a trailing newline even without a PTY,
-        # so ReadLine() would block indefinitely on the prompt line. The runspace
-        # reads one character at a time and flushes to the queue on every newline
-        # AND whenever the accumulated buffer matches a device prompt pattern.
-        # The prompt-flush regex requires a valid hostname prefix before # or >
-        # so that pager strings like "--More--" are never mistaken for a prompt.
-        $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-        # Three-element array shared with the reader runspace as mutable regex slots.
-        # [0] = device prompt pattern (updated after hostname discovery)
-        # [1] = interactive prompt pattern (e.g. WLC pagination "(y/n)")
-        # [2] = pager prompt pattern (bare ":" from more/less pager in login banners)
-        # The outer scope overwrites these; the runspace reads them on every character.
-        # String reference assignment is atomic in .NET.
-        $regexHolder = [string[]]::new(3)
-        $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>|^[A-Za-z]+(?:/[A-Za-z0-9]+)+:[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$'
-        $regexHolder[1] = $InteractivePattern   # populated per-OS if interactive prompts are needed
-        $regexHolder[2] = '^\s*:\s*$'           # bare ":" pager prompt (more/less)
+            # Compiled interactive prompt regex for auto-responding to mid-command prompts.
+            # Only built when the OS type defines an InteractivePattern (e.g. WLC AireOS pagination).
+            $interactiveRegex = $null
+            if ($InteractivePattern -ne '') {
+                $interactiveRegex = [System.Text.RegularExpressions.Regex]::new(
+                    $InteractivePattern,
+                    [System.Text.RegularExpressions.RegexOptions]::Compiled
+                )
+            }
+            # Compiled pager prompt regex — detects bare ":" from more/less pager in login banners.
+            # When matched during initial prompt wait, sends a Space keypress to page through.
+            $pagerRegex = [System.Text.RegularExpressions.Regex]::new(
+                '^\s*:\s*$',
+                [System.Text.RegularExpressions.RegexOptions]::Compiled
+            )
+            # Cisco IOS sends the prompt without a trailing newline even without a PTY,
+            # so ReadLine() would block indefinitely on the prompt line. The runspace
+            # reads one character at a time and flushes to the queue on every newline
+            # AND whenever the accumulated buffer matches a device prompt pattern.
+            # The prompt-flush regex requires a valid hostname prefix before # or >
+            # so that pager strings like "--More--" are never mistaken for a prompt.
+            $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+            # Three-element array shared with the reader runspace as mutable regex slots.
+            # [0] = device prompt pattern (updated after hostname discovery)
+            # [1] = interactive prompt pattern (e.g. WLC pagination "(y/n)")
+            # [2] = pager prompt pattern (bare ":" from more/less pager in login banners)
+            # The outer scope overwrites these; the runspace reads them on every character.
+            # String reference assignment is atomic in .NET.
+            $regexHolder = [string[]]::new(3)
+            $regexHolder[0] = '(?:^\S*?@[A-Za-z0-9_-]+[>#]|^[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>|^[A-Za-z]+(?:/[A-Za-z0-9]+)+:[A-Za-z0-9][A-Za-z0-9._-]*(?:\([A-Za-z0-9/_-]*\))?[#>])\s*$'
+            $regexHolder[1] = $InteractivePattern   # populated per-OS if interactive prompts are needed
+            $regexHolder[2] = '^\s*:\s*$'           # bare ":" pager prompt (more/less)
 
-        $readerRunspace = [PowerShell]::Create()
-        $readerRunspace.AddScript({
-                param($reader, $queue, $holder)
-                # Regex to strip ANSI escape sequences (CSI sequences, OSC sequences,
-                # and bare ESC + single char). PTY-allocated sessions often wrap the
-                # prompt in escape codes that prevent the prompt regex from matching.
-                $ansiPattern = '\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[\x20-\x2F][\x30-\x7E]|\x1b.'
-                try {
-                    $buf = [System.Text.StringBuilder]::new()
-                    while ($true) {
-                        $c = $reader.Read()       # blocks until a char is available or EOS
-                        if ($c -eq -1) { break }  # end of stream
-                        $ch = [char]$c
-                        if ($ch -eq "`r") { continue }   # discard bare CR
-                        if ($ch -eq "`n") {
-                            # Strip ANSI codes before enqueuing the completed line.
-                            $cleaned = $buf.ToString() -replace $ansiPattern, ''
-                            $queue.Enqueue($cleaned)
-                            $buf.Clear() | Out-Null
-                        }
-                        else {
-                            $buf.Append($ch) | Out-Null
-                            # Strip ANSI codes before testing the buffer against prompt patterns.
-                            # The raw buffer may contain escape sequences that prevent matching.
-                            $stripped = $buf.ToString() -replace $ansiPattern, ''
-                            # Flush when the stripped buffer matches the device prompt or an
-                            # interactive prompt (e.g. WLC pagination "(y/n)").
-                            # After the hostname is discovered the outer scope writes a
-                            # tighter hostname-anchored pattern into $holder[0], preventing
-                            # table column headers (e.g. "Switch#") from being flushed.
-                            if ($stripped -match $holder[0]) {
-                                $queue.Enqueue($stripped)
-                                $buf.Clear() | Out-Null
-                            } elseif ($holder[1] -and $stripped -match $holder[1]) {
-                                $queue.Enqueue($stripped)
-                                $buf.Clear() | Out-Null
-                            } elseif ($holder[2] -and $stripped -match $holder[2]) {
-                                $queue.Enqueue($stripped)
+            $readerRunspace = [PowerShell]::Create()
+            $readerRunspace.AddScript({
+                    param($reader, $queue, $holder)
+                    # Regex to strip ANSI escape sequences (CSI sequences, OSC sequences,
+                    # and bare ESC + single char). PTY-allocated sessions often wrap the
+                    # prompt in escape codes that prevent the prompt regex from matching.
+                    $ansiPattern = '\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[\x20-\x2F][\x30-\x7E]|\x1b.'
+                    try {
+                        $buf = [System.Text.StringBuilder]::new()
+                        while ($true) {
+                            $c = $reader.Read()       # blocks until a char is available or EOS
+                            if ($c -eq -1) { break }  # end of stream
+                            $ch = [char]$c
+                            if ($ch -eq "`r") { continue }   # discard bare CR
+                            if ($ch -eq "`n") {
+                                # Strip ANSI codes before enqueuing the completed line.
+                                $cleaned = $buf.ToString() -replace $ansiPattern, ''
+                                $queue.Enqueue($cleaned)
                                 $buf.Clear() | Out-Null
                             }
+                            else {
+                                $buf.Append($ch) | Out-Null
+                                # Strip ANSI codes before testing the buffer against prompt patterns.
+                                # The raw buffer may contain escape sequences that prevent matching.
+                                $stripped = $buf.ToString() -replace $ansiPattern, ''
+                                # Flush when the stripped buffer matches the device prompt or an
+                                # interactive prompt (e.g. WLC pagination "(y/n)").
+                                # After the hostname is discovered the outer scope writes a
+                                # tighter hostname-anchored pattern into $holder[0], preventing
+                                # table column headers (e.g. "Switch#") from being flushed.
+                                if ($stripped -match $holder[0]) {
+                                    $queue.Enqueue($stripped)
+                                    $buf.Clear() | Out-Null
+                                }
+                                elseif ($holder[1] -and $stripped -match $holder[1]) {
+                                    $queue.Enqueue($stripped)
+                                    $buf.Clear() | Out-Null
+                                }
+                                elseif ($holder[2] -and $stripped -match $holder[2]) {
+                                    $queue.Enqueue($stripped)
+                                    $buf.Clear() | Out-Null
+                                }
+                            }
+                        }
+                        if ($buf.Length -gt 0) {
+                            $cleaned = $buf.ToString() -replace $ansiPattern, ''
+                            $queue.Enqueue($cleaned)
                         }
                     }
-                    if ($buf.Length -gt 0) {
-                        $cleaned = $buf.ToString() -replace $ansiPattern, ''
-                        $queue.Enqueue($cleaned)
+                    catch { }
+                    finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
+                }).AddArgument($proc.StandardOutput).AddArgument($lineQueue).AddArgument($regexHolder) | Out-Null
+            $readerHandle = $readerRunspace.BeginInvoke()
+
+            # Wait for the initial device prompt before sending any commands.
+            # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
+            $initialTimeoutMs = $InitialCmdTimeoutSec * 1000
+            $perCmdTimeoutMs = $CmdTimeoutSec * 1000
+            $lastPrompt = ""
+            $promptFound = $false
+            $newlineNudgeSent = $false
+
+            # OS profiles that require an immediate newline get one right away
+            # (e.g. WLC AireOS devices that won't display the prompt without a keypress).
+            if ($SendInitialNewline) {
+                Start-Sleep -Milliseconds 500
+                $proc.StandardInput.WriteLine("")
+                $proc.StandardInput.Flush()
+                Write-Verbose "Sent initial newline (OS profile) to trigger prompt on $IPAddress"
+                $newlineNudgeSent = $true
+            }
+
+            if (-not $usePTY -and $ptyAttempt -eq 0) {
+                # Phase 1: Quick check (up to 3s) — enough for stty error to appear in stderr.
+                # If the prompt arrives quickly, we proceed immediately.
+                $quickMs = [Math]::Min(3000, $initialTimeoutMs)
+                $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $quickMs -PromptText ([ref]$lastPrompt) `
+                    -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+
+                if (-not $promptFound) {
+                    # Check stderr for stty failure — indicates device requires PTY allocation.
+                    # Different SSH/OS combos produce different error messages:
+                    #   "stty: ... Inappropriate ioctl for device"  (Linux/macOS)
+                    #   "stty: standard input: Invalid argument"    (NX-OS, some others)
+                    if ($stdErrBuilder.ToString() -match "stty.*(?:Inappropriate ioctl|Invalid argument)") {
+                        Write-Verbose "stty error detected on $IPAddress - retrying with PTY allocation (-tt)"
+                        $usePTY = $true
+                        continue   # finally cleans up this attempt, loop retries with -tt
+                    }
+
+                    # Universal newline nudge — some devices (ISR routers, certain IOS-XE
+                    # platforms) wait for a keypress after the MOTD before showing the prompt.
+                    # Send a blank line as a nudge, then continue waiting. Harmless on devices
+                    # that already showed their prompt (IOS just redisplays the prompt).
+                    if (-not $newlineNudgeSent) {
+                        $proc.StandardInput.WriteLine("")
+                        $proc.StandardInput.Flush()
+                        Write-Verbose "Sent newline nudge to trigger prompt on $IPAddress (no prompt after ${quickMs}ms)"
+                        $newlineNudgeSent = $true
+                    }
+
+                    # Continue waiting for the remaining initial timeout.
+                    $remainingMs = $initialTimeoutMs - $quickMs
+                    if ($remainingMs -gt 0) {
+                        $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt) `
+                            -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
                     }
                 }
-                catch { }
-                finally { $queue.Enqueue($null) }   # null sentinel signals end of stream
-            }).AddArgument($proc.StandardOutput).AddArgument($lineQueue).AddArgument($regexHolder) | Out-Null
-        $readerHandle = $readerRunspace.BeginInvoke()
+            }
+            else {
+                # AllocatePTY is true (or this is a PTY retry): use the full initial timeout.
+                # First try a short wait in case the prompt arrives immediately.
+                $nudgeMs = [Math]::Min(3000, $initialTimeoutMs)
+                $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $nudgeMs -PromptText ([ref]$lastPrompt) `
+                    -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
 
-        # Wait for the initial device prompt before sending any commands.
-        # This ensures the SSH login sequence (banners, MOTD, etc.) has completed.
-        $initialTimeoutMs = $InitialCmdTimeoutSec * 1000
-        $perCmdTimeoutMs  = $CmdTimeoutSec * 1000
-        $lastPrompt = ""
-        $promptFound = $false
-        $newlineNudgeSent = $false
-
-        # OS profiles that require an immediate newline get one right away
-        # (e.g. WLC AireOS devices that won't display the prompt without a keypress).
-        if ($SendInitialNewline) {
-            Start-Sleep -Milliseconds 500
-            $proc.StandardInput.WriteLine("")
-            $proc.StandardInput.Flush()
-            Write-Verbose "Sent initial newline (OS profile) to trigger prompt on $IPAddress"
-            $newlineNudgeSent = $true
-        }
-
-        if (-not $usePTY -and $ptyAttempt -eq 0) {
-            # Phase 1: Quick check (up to 3s) — enough for stty error to appear in stderr.
-            # If the prompt arrives quickly, we proceed immediately.
-            $quickMs = [Math]::Min(3000, $initialTimeoutMs)
-            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $quickMs -PromptText ([ref]$lastPrompt) `
-                -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+                if (-not $promptFound) {
+                    # Send a newline nudge if one hasn't been sent yet, then wait the remaining time.
+                    if (-not $newlineNudgeSent) {
+                        $proc.StandardInput.WriteLine("")
+                        $proc.StandardInput.Flush()
+                        Write-Verbose "Sent newline nudge to trigger prompt on $IPAddress (PTY, no prompt after ${nudgeMs}ms)"
+                        $newlineNudgeSent = $true
+                    }
+                    $remainingMs = $initialTimeoutMs - $nudgeMs
+                    if ($remainingMs -gt 0) {
+                        $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt) `
+                            -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+                    }
+                }
+            }
 
             if (-not $promptFound) {
-                # Check stderr for stty failure — indicates device requires PTY allocation.
-                # Different SSH/OS combos produce different error messages:
-                #   "stty: ... Inappropriate ioctl for device"  (Linux/macOS)
-                #   "stty: standard input: Invalid argument"    (NX-OS, some others)
-                if ($stdErrBuilder.ToString() -match "stty.*(?:Inappropriate ioctl|Invalid argument)") {
-                    Write-Verbose "stty error detected on $IPAddress - retrying with PTY allocation (-tt)"
+                # Aggressive fallback: if this was a -T attempt with no meaningful stdout, retry with PTY.
+                # Covers devices that need PTY but don't produce the stty error (e.g. libssh servers),
+                # and devices that send whitespace-only output (blank lines, newlines) before stalling.
+                if (-not $usePTY -and $ptyAttempt -eq 0 -and $stdOutBuilder.ToString().Trim().Length -eq 0) {
+                    Write-Verbose "No meaningful stdout on $IPAddress after ${InitialCmdTimeoutSec}s - retrying with PTY allocation (-tt)"
                     $usePTY = $true
-                    continue   # finally cleans up this attempt, loop retries with -tt
+                    continue   # finally cleans up, loop retries with -tt
+                }
+                if (-not $proc.HasExited) { $proc.Kill() }
+                throw "Timed out waiting for initial device prompt after ${InitialCmdTimeoutSec}s. Consider increasing -InitialPromptTimeoutSeconds."
+            }
+
+            # Now that the initial prompt is captured in $lastPrompt (e.g. "s3850x-1#"),
+            # extract the device hostname and replace the broad prompt-detection regex with
+            # one anchored to this exact hostname. This prevents output lines that happen to
+            # match the broad pattern (e.g. the "Switch#" column header in "show switch")
+            # from being misidentified as a device prompt.
+            $knownHostname = Get-HostnameFromPrompt -Output $lastPrompt
+            if (-not [string]::IsNullOrWhiteSpace($knownHostname)) {
+                $hn = [System.Text.RegularExpressions.Regex]::Escape($knownHostname)
+
+                # Update the shared holder so the already-running reader runspace picks up
+                # the tighter pattern on its next character iteration.
+                # Always include the broad WLC pattern — hostname can't be extracted from
+                # WLC prompts, so the parenthesized pattern stays broad throughout the session.
+                $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>|^[A-Za-z]+(?:/[A-Za-z0-9]+)+:$hn(?:\([A-Za-z0-9/_-]*\))?[#>])\s*`$"
+
+                # Replace the compiled Regex used by Read-UntilPrompt for all subsequent calls.
+                $promptRegex = [System.Text.RegularExpressions.Regex]::new(
+                    "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)|(?:^\([^)]+\)\s*>)|(?:^[A-Za-z]+(?:/[A-Za-z0-9]+)+:$hn(?:\([A-Za-z0-9/_-]*\))?[#>])",
+                    [System.Text.RegularExpressions.RegexOptions]::Compiled
+                )
+            }
+            # If hostname extraction failed, $promptRegex and $regexHolder[0] remain the
+            # broad patterns — behaviour is identical to before, which is the correct fallback.
+
+            # When PTY is allocated, the remote terminal has echo enabled by default.
+            # Suppress it now so subsequent commands don't echo back through the PTY,
+            # which would confuse prompt detection and pollute captured output.
+            if ($usePTY) {
+                $proc.StandardInput.WriteLine("stty -echo 2>/dev/null")
+                $proc.StandardInput.Flush()
+                $sttyDrain = [System.Text.StringBuilder]::new()
+                # Drain the echoed prompt prefix that the PTY sends back
+                Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$null) | Out-Null
+                # Drain the stty command text echo and wait for the real prompt
+                Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$lastPrompt) | Out-Null
+            }
+
+            # Send paging-disable commands silently (output not logged).
+            # These are OS-specific (e.g. "terminal length 0" for IOS, "config paging disable"
+            # for AireOS) and are sent automatically so users don't need them in command files.
+            foreach ($pagingCmd in $PagingCommands) {
+                $proc.StandardInput.WriteLine($pagingCmd)
+                $proc.StandardInput.Flush()
+                $pagingDrain = [System.Text.StringBuilder]::new()
+                Read-UntilPrompt -Queue $lineQueue -Builder $pagingDrain `
+                    -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$lastPrompt) | Out-Null
+            }
+
+            # Send each command and wait for the resulting prompt before proceeding.
+            # This guarantees all output from a command is collected before the next
+            # command is sent, eliminating the out-of-order output race condition.
+            foreach ($cmd in $CommandList) {
+                # Optional settle delay applied after receiving the previous prompt,
+                # before sending the next command. Useful for devices that display
+                # the prompt slightly before their output buffer is fully flushed.
+                if ($CmdDelayMs -gt 0) { Start-Sleep -Milliseconds $CmdDelayMs }
+
+                # Drain stale prompt lines from the queue BEFORE sending the command.
+                # WLC AireOS (and some other devices) echo the prompt multiple times
+                # after the previous command completes. These stale prompts arrive
+                # after Read-UntilPrompt matched the first prompt and returned.
+                # If not drained, Read-UntilPrompt matches one as the "end of command"
+                # prompt and returns before any real output arrives, causing output to
+                # cascade into the next command's JSON section.
+                # The drain must happen BEFORE the command is sent, otherwise the stale
+                # prompts race with the command echo and can't be distinguished.
+                $drainLine = ""
+                while ($lineQueue.TryDequeue([ref]$drainLine)) {
+                    if ($null -eq $drainLine) { break }   # don't consume the EOS sentinel
+                    $strippedDrain = $drainLine -replace '\x1b\[[0-9;]*[a-zA-Z]', '' -replace '\x1b\][^\x07]*\x07', ''
+                    if ($promptRegex.IsMatch($strippedDrain.TrimEnd())) {
+                        $stdOutBuilder.AppendLine($drainLine) | Out-Null
+                    }
+                    else {
+                        # Non-prompt content — shouldn't happen between commands, but
+                        # log it so it isn't silently lost.
+                        $stdOutBuilder.AppendLine($drainLine) | Out-Null
+                    }
                 }
 
-                # Universal newline nudge — some devices (ISR routers, certain IOS-XE
-                # platforms) wait for a keypress after the MOTD before showing the prompt.
-                # Send a blank line as a nudge, then continue waiting. Harmless on devices
-                # that already showed their prompt (IOS just redisplays the prompt).
-                if (-not $newlineNudgeSent) {
-                    $proc.StandardInput.WriteLine("")
+                $proc.StandardInput.WriteLine($cmd)
+                $proc.StandardInput.Flush()
+
+                # Dequeue the command echo. Cisco devices echo the command back as the
+                # first line of output. Join it with the held prompt to produce the
+                # natural "hostname#show inventory" layout seen in a live session.
+                $echoLine = ""
+                $echoDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
+                while ([DateTime]::UtcNow -lt $echoDeadline) {
+                    if ($lineQueue.TryDequeue([ref]$echoLine)) { break }
+                    Start-Sleep -Milliseconds 20
+                }
+                $stdOutBuilder.AppendLine("$lastPrompt$echoLine") | Out-Null
+
+                # Use a dedicated per-command builder for structured JSON output capture.
+                # $stdOutBuilder continues to receive the formatted log content unchanged.
+                $cmdOutputBuilder = [System.Text.StringBuilder]::new()
+
+                # Capture the current prompt before Read-UntilPrompt overwrites $lastPrompt.
+                # Stored per-command so the netcortex output can reconstruct the prompt+command
+                # echo line (e.g. "cs3850x-1#term len 0") without re-parsing raw output.
+                $cmdPrompt = $lastPrompt
+                $lastPrompt = ""
+                if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex)) {
+                    # Flush any partial output received before the timeout so it appears
+                    # in the failure log's PARTIAL OUTPUT section for troubleshooting.
+                    if ($cmdOutputBuilder.Length -gt 0) {
+                        $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
+                    }
+                    $proc.Kill()
+                    throw "Timed out waiting for device prompt after command '$cmd'."
+                }
+
+                # Forward the per-command output into $stdOutBuilder so the log file
+                # format is completely unchanged.
+                $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
+
+                # Split the per-command output into an array of strings for JSON.
+                # Each array element is one output line; blank lines become empty strings,
+                # matching the raw_output format in the example JSON.
+                $rawLines = $cmdOutputBuilder.ToString() -split "`r?`n"
+                $result.CommandResults.Add([PSCustomObject]@{
+                        command    = $cmd
+                        prompt     = $cmdPrompt
+                        raw_output = [string[]]$rawLines
+                    })
+
+                # Repeat the prompt twice as visual separators between command blocks.
+                # Using the actual prompt (rather than blank lines) means every non-blank
+                # line in the output section is either a prompt, a command echo, or device
+                # output — making the log straightforward to parse programmatically later.
+                $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+                $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+            }
+
+            # Write the final prompt (returned after the last command's output) so
+            # the log ends exactly as a real terminal session would.
+            if ($lastPrompt -ne "") { $stdOutBuilder.AppendLine($lastPrompt) | Out-Null }
+
+            # With PTY (-tt), closing stdin does NOT cause the remote session to end —
+            # the PTY keeps the shell alive indefinitely. Send the OS-specific exit
+            # sequence to cleanly close the remote CLI session before closing stdin.
+            # For AireOS WLC: "logout" then "n" (decline save-config prompt).
+            if ($usePTY -and $ExitCommands.Count -gt 0) {
+                foreach ($exitCmd in $ExitCommands) {
+                    $proc.StandardInput.WriteLine($exitCmd)
                     $proc.StandardInput.Flush()
-                    Write-Verbose "Sent newline nudge to trigger prompt on $IPAddress (no prompt after ${quickMs}ms)"
-                    $newlineNudgeSent = $true
-                }
-
-                # Continue waiting for the remaining initial timeout.
-                $remainingMs = $initialTimeoutMs - $quickMs
-                if ($remainingMs -gt 0) {
-                    $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt) `
-                        -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+                    Start-Sleep -Milliseconds 100
                 }
             }
-        }
-        else {
-            # AllocatePTY is true (or this is a PTY retry): use the full initial timeout.
-            # First try a short wait in case the prompt arrives immediately.
-            $nudgeMs = [Math]::Min(3000, $initialTimeoutMs)
-            $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $nudgeMs -PromptText ([ref]$lastPrompt) `
-                -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+            $proc.StandardInput.Close()
 
-            if (-not $promptFound) {
-                # Send a newline nudge if one hasn't been sent yet, then wait the remaining time.
-                if (-not $newlineNudgeSent) {
-                    $proc.StandardInput.WriteLine("")
-                    $proc.StandardInput.Flush()
-                    Write-Verbose "Sent newline nudge to trigger prompt on $IPAddress (PTY, no prompt after ${nudgeMs}ms)"
-                    $newlineNudgeSent = $true
-                }
-                $remainingMs = $initialTimeoutMs - $nudgeMs
-                if ($remainingMs -gt 0) {
-                    $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $remainingMs -PromptText ([ref]$lastPrompt) `
-                        -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
+            # Drain any remaining output after stdin is closed (e.g. logout messages).
+            Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs ([Math]::Min($perCmdTimeoutMs, 5000)) -PromptText ([ref]$null) | Out-Null
+
+            # Wait for the SSH process to exit. Use a fixed short timeout rather than
+            # one proportional to commands — all commands have already completed at this
+            # point, so only a brief window is needed for the process to close cleanly.
+            $postSessionTimeoutMs = 3000
+            $exited = $proc.WaitForExit($postSessionTimeoutMs)
+
+            if (-not $exited) {
+                # All commands completed successfully; the process just didn't exit
+                # cleanly (common with PTY sessions). Kill it — this is not an error.
+                $proc.Kill()
+                Write-Verbose "SSH process on $IPAddress did not exit within 3s after session end - killed."
+            }
+
+            Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+
+            # Wait for the reader runspace to finish draining the stdout stream
+            $readerRunspace.EndInvoke($readerHandle) | Out-Null
+            $readerRunspace.Dispose()
+
+            $stdOut = $stdOutBuilder.ToString()
+            $stdErr = $stdErrBuilder.ToString().Trim()
+
+            # Determine success or failure.
+            # A non-zero exit code alone does not mean failure — some devices (e.g. AireOS
+            # WLC "logout") close the connection in a way that produces SSH exit code -1
+            # even though all commands completed successfully. If every command ran and
+            # returned a prompt, the session is successful regardless of SSH exit code.
+            $allCommandsRan = ($result.CommandResults.Count -eq $CommandList.Count)
+            if ($allCommandsRan) {
+                $result.Status = "Success"
+                if ($proc.ExitCode -ne 0) {
+                    Write-Verbose "SSH exit code $($proc.ExitCode) on $IPAddress ignored - all $($CommandList.Count) commands completed."
                 }
             }
-        }
-
-        if (-not $promptFound) {
-            # Aggressive fallback: if this was a -T attempt with no meaningful stdout, retry with PTY.
-            # Covers devices that need PTY but don't produce the stty error (e.g. libssh servers),
-            # and devices that send whitespace-only output (blank lines, newlines) before stalling.
-            if (-not $usePTY -and $ptyAttempt -eq 0 -and $stdOutBuilder.ToString().Trim().Length -eq 0) {
-                Write-Verbose "No meaningful stdout on $IPAddress after ${InitialCmdTimeoutSec}s - retrying with PTY allocation (-tt)"
-                $usePTY = $true
-                continue   # finally cleans up, loop retries with -tt
-            }
-            if (-not $proc.HasExited) { $proc.Kill() }
-            throw "Timed out waiting for initial device prompt after ${InitialCmdTimeoutSec}s. Consider increasing -InitialPromptTimeoutSeconds."
-        }
-
-        # Now that the initial prompt is captured in $lastPrompt (e.g. "s3850x-1#"),
-        # extract the device hostname and replace the broad prompt-detection regex with
-        # one anchored to this exact hostname. This prevents output lines that happen to
-        # match the broad pattern (e.g. the "Switch#" column header in "show switch")
-        # from being misidentified as a device prompt.
-        $knownHostname = Get-HostnameFromPrompt -Output $lastPrompt
-        if (-not [string]::IsNullOrWhiteSpace($knownHostname)) {
-            $hn = [System.Text.RegularExpressions.Regex]::Escape($knownHostname)
-
-            # Update the shared holder so the already-running reader runspace picks up
-            # the tighter pattern on its next character iteration.
-            # Always include the broad WLC pattern — hostname can't be extracted from
-            # WLC prompts, so the parenthesized pattern stays broad throughout the session.
-            $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>|^[A-Za-z]+(?:/[A-Za-z0-9]+)+:$hn(?:\([A-Za-z0-9/_-]*\))?[#>])\s*`$"
-
-            # Replace the compiled Regex used by Read-UntilPrompt for all subsequent calls.
-            $promptRegex = [System.Text.RegularExpressions.Regex]::new(
-                "(?:^\S*?@$hn[>#:`$%])|(?:^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]\s*`$)|(?:^\([^)]+\)\s*>)|(?:^[A-Za-z]+(?:/[A-Za-z0-9]+)+:$hn(?:\([A-Za-z0-9/_-]*\))?[#>])",
-                [System.Text.RegularExpressions.RegexOptions]::Compiled
-            )
-        }
-        # If hostname extraction failed, $promptRegex and $regexHolder[0] remain the
-        # broad patterns — behaviour is identical to before, which is the correct fallback.
-
-        # When PTY is allocated, the remote terminal has echo enabled by default.
-        # Suppress it now so subsequent commands don't echo back through the PTY,
-        # which would confuse prompt detection and pollute captured output.
-        if ($usePTY) {
-            $proc.StandardInput.WriteLine("stty -echo 2>/dev/null")
-            $proc.StandardInput.Flush()
-            $sttyDrain = [System.Text.StringBuilder]::new()
-            # Drain the echoed prompt prefix that the PTY sends back
-            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$null) | Out-Null
-            # Drain the stty command text echo and wait for the real prompt
-            Read-UntilPrompt -Queue $lineQueue -Builder $sttyDrain -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$lastPrompt) | Out-Null
-        }
-
-        # Send paging-disable commands silently (output not logged).
-        # These are OS-specific (e.g. "terminal length 0" for IOS, "config paging disable"
-        # for AireOS) and are sent automatically so users don't need them in command files.
-        foreach ($pagingCmd in $PagingCommands) {
-            $proc.StandardInput.WriteLine($pagingCmd)
-            $proc.StandardInput.Flush()
-            $pagingDrain = [System.Text.StringBuilder]::new()
-            Read-UntilPrompt -Queue $lineQueue -Builder $pagingDrain `
-                -PromptRegex $promptRegex -TimeoutMs 2000 -PromptText ([ref]$lastPrompt) | Out-Null
-        }
-
-        # Send each command and wait for the resulting prompt before proceeding.
-        # This guarantees all output from a command is collected before the next
-        # command is sent, eliminating the out-of-order output race condition.
-        foreach ($cmd in $CommandList) {
-            # Optional settle delay applied after receiving the previous prompt,
-            # before sending the next command. Useful for devices that display
-            # the prompt slightly before their output buffer is fully flushed.
-            if ($CmdDelayMs -gt 0) { Start-Sleep -Milliseconds $CmdDelayMs }
-
-            # Drain stale prompt lines from the queue BEFORE sending the command.
-            # WLC AireOS (and some other devices) echo the prompt multiple times
-            # after the previous command completes. These stale prompts arrive
-            # after Read-UntilPrompt matched the first prompt and returned.
-            # If not drained, Read-UntilPrompt matches one as the "end of command"
-            # prompt and returns before any real output arrives, causing output to
-            # cascade into the next command's JSON section.
-            # The drain must happen BEFORE the command is sent, otherwise the stale
-            # prompts race with the command echo and can't be distinguished.
-            $drainLine = ""
-            while ($lineQueue.TryDequeue([ref]$drainLine)) {
-                if ($null -eq $drainLine) { break }   # don't consume the EOS sentinel
-                $strippedDrain = $drainLine -replace '\x1b\[[0-9;]*[a-zA-Z]', '' -replace '\x1b\][^\x07]*\x07', ''
-                if ($promptRegex.IsMatch($strippedDrain.TrimEnd())) {
-                    $stdOutBuilder.AppendLine($drainLine) | Out-Null
+            elseif ($proc.ExitCode -ne 0) {
+                $result.Status = "Failed"
+                if ([string]::IsNullOrWhiteSpace($stdErr)) {
+                    $result.Error = "SSH exit code $($proc.ExitCode)"
                 }
                 else {
-                    # Non-prompt content — shouldn't happen between commands, but
-                    # log it so it isn't silently lost.
-                    $stdOutBuilder.AppendLine($drainLine) | Out-Null
+                    # Parse each line of debug for final error output detail
+                    $errorLines = $stdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                    foreach ($err in $errorLines) {
+                        $result.Error = $err
+                    }
                 }
+                $result.AuthFailed = Test-IsAuthFailure -StdErr $stdErr
+            }
+            else {
+                $result.Status = "Success"
             }
 
-            $proc.StandardInput.WriteLine($cmd)
-            $proc.StandardInput.Flush()
-
-            # Dequeue the command echo. Cisco devices echo the command back as the
-            # first line of output. Join it with the held prompt to produce the
-            # natural "hostname#show inventory" layout seen in a live session.
-            $echoLine = ""
-            $echoDeadline = [DateTime]::UtcNow.AddMilliseconds(1500)
-            while ([DateTime]::UtcNow -lt $echoDeadline) {
-                if ($lineQueue.TryDequeue([ref]$echoLine)) { break }
-                Start-Sleep -Milliseconds 20
+            # Parse hostname from the device prompt in captured output
+            $deviceName = Get-HostnameFromPrompt -Output $stdOut
+            if ([string]::IsNullOrWhiteSpace($deviceName)) {
+                $deviceName = "unknown"
+                Write-Verbose "Could not parse hostname from prompt for $IPAddress - using 'unknown'"
             }
-            $stdOutBuilder.AppendLine("$lastPrompt$echoLine") | Out-Null
+            $result.DeviceName = $deviceName
 
-            # Use a dedicated per-command builder for structured JSON output capture.
-            # $stdOutBuilder continues to receive the formatted log content unchanged.
-            $cmdOutputBuilder = [System.Text.StringBuilder]::new()
+            # Build log filename now that we know the hostname
+            $safeDevice = ConvertTo-SafeFileName $deviceName
+            $safeIP = ConvertTo-SafeFileName $IPAddress
+            $logFileName = "${safeDevice}_${safeIP}_${SessionTimestamp}.log"
+            $logFilePath = Join-Path $LogDirectoryPath $logFileName
+            $result.LogFile = $logFilePath
 
-            # Capture the current prompt before Read-UntilPrompt overwrites $lastPrompt.
-            # Stored per-command so the netcortex output can reconstruct the prompt+command
-            # echo line (e.g. "cs3850x-1#term len 0") without re-parsing raw output.
-            $cmdPrompt = $lastPrompt
-            $lastPrompt = ""
-            if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex)) {
-                # Flush any partial output received before the timeout so it appears
-                # in the failure log's PARTIAL OUTPUT section for troubleshooting.
-                if ($cmdOutputBuilder.Length -gt 0) {
-                    $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
-                }
-                $proc.Kill()
-                throw "Timed out waiting for device prompt after command '$cmd'."
+            # Build log content using string array (avoids here-string indentation issues)
+            $logLines = @(
+                $separator
+                " Device    : $deviceName ($IPAddress)"
+                " User      : $User"
+                " Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                " Status    : $($result.Status)"
+                " Conn Tmout: ${Timeout}s"
+                " Cmd Tmout : ${CmdTimeoutSec}s"
+                " OS Type  : $OSType"
+                " PTY      : $ptyFlag"
+                $separator
+                ""
+                "$thinSep COMMANDS SENT $thinSep"
+                ($CommandList -join "`r`n")
+                ""
+                "$thinSep DEVICE OUTPUT $thinSep"
+                $stdOut
+            )
+
+            if (-not [string]::IsNullOrWhiteSpace($stdErr)) {
+                $logLines += ""
+                $logLines += "$thinSep SSH ERRORS / DIAGNOSTICS $thinSep"
+                $logLines += $stdErr
             }
 
-            # Forward the per-command output into $stdOutBuilder so the log file
-            # format is completely unchanged.
-            $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
+            if ($LogOutputEnabled) {
+                Set-Content -Path $logFilePath -Value ($logLines -join "`r`n") -Encoding UTF8
+            }
 
-            # Split the per-command output into an array of strings for JSON.
-            # Each array element is one output line; blank lines become empty strings,
-            # matching the raw_output format in the example JSON.
-            $rawLines = $cmdOutputBuilder.ToString() -split "`r?`n"
-            $result.CommandResults.Add([PSCustomObject]@{
-                    command    = $cmd
-                    prompt     = $cmdPrompt
-                    raw_output = [string[]]$rawLines
-                })
-
-            # Repeat the prompt twice as visual separators between command blocks.
-            # Using the actual prompt (rather than blank lines) means every non-blank
-            # line in the output section is either a prompt, a command echo, or device
-            # output — making the log straightforward to parse programmatically later.
-            $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
-            $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+            break   # Success — exit the PTY retry loop
         }
-
-        # Write the final prompt (returned after the last command's output) so
-        # the log ends exactly as a real terminal session would.
-        if ($lastPrompt -ne "") { $stdOutBuilder.AppendLine($lastPrompt) | Out-Null }
-
-        # With PTY (-tt), closing stdin does NOT cause the remote session to end —
-        # the PTY keeps the shell alive indefinitely. Send the OS-specific exit
-        # sequence to cleanly close the remote CLI session before closing stdin.
-        # For AireOS WLC: "logout" then "n" (decline save-config prompt).
-        if ($usePTY -and $ExitCommands.Count -gt 0) {
-            foreach ($exitCmd in $ExitCommands) {
-                $proc.StandardInput.WriteLine($exitCmd)
-                $proc.StandardInput.Flush()
-                Start-Sleep -Milliseconds 100
-            }
-        }
-        $proc.StandardInput.Close()
-
-        # Drain any remaining output after stdin is closed (e.g. logout messages).
-        Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs ([Math]::Min($perCmdTimeoutMs, 5000)) -PromptText ([ref]$null) | Out-Null
-
-        # Wait for the SSH process to exit. Use a fixed short timeout rather than
-        # one proportional to commands — all commands have already completed at this
-        # point, so only a brief window is needed for the process to close cleanly.
-        $postSessionTimeoutMs = 3000
-        $exited = $proc.WaitForExit($postSessionTimeoutMs)
-
-        if (-not $exited) {
-            # All commands completed successfully; the process just didn't exit
-            # cleanly (common with PTY sessions). Kill it — this is not an error.
-            $proc.Kill()
-            Write-Verbose "SSH process on $IPAddress did not exit within 3s after session end - killed."
-        }
-
-        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
-
-        # Wait for the reader runspace to finish draining the stdout stream
-        $readerRunspace.EndInvoke($readerHandle) | Out-Null
-        $readerRunspace.Dispose()
-
-        $stdOut = $stdOutBuilder.ToString()
-        $stdErr = $stdErrBuilder.ToString().Trim()
-
-        # Determine success or failure.
-        # A non-zero exit code alone does not mean failure — some devices (e.g. AireOS
-        # WLC "logout") close the connection in a way that produces SSH exit code -1
-        # even though all commands completed successfully. If every command ran and
-        # returned a prompt, the session is successful regardless of SSH exit code.
-        $allCommandsRan = ($result.CommandResults.Count -eq $CommandList.Count)
-        if ($allCommandsRan) {
-            $result.Status = "Success"
-            if ($proc.ExitCode -ne 0) {
-                Write-Verbose "SSH exit code $($proc.ExitCode) on $IPAddress ignored - all $($CommandList.Count) commands completed."
-            }
-        } elseif ($proc.ExitCode -ne 0) {
+        catch {
             $result.Status = "Failed"
-            if ([string]::IsNullOrWhiteSpace($stdErr)) {
-                $result.Error = "SSH exit code $($proc.ExitCode)"
-            } else {
-                # Parse each line of debug for final error output detail
-                $errorLines = $stdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-                foreach ($err in $errorLines) {
-                    $result.Error = $err
+            $result.DeviceName = "unknown"
+
+            # Read whatever stderr was collected before the exception was thrown.
+            # SSH auth rejection ("Permission denied") appears here even when the
+            # exception path is taken instead of the normal exit-code path.
+            $catchStdErr = if ($null -ne $stdErrBuilder) { $stdErrBuilder.ToString().Trim() } else { "" }
+
+            # Auth failure takes priority over the exception message for both
+            # $result.Error and $result.AuthFailed.
+            $result.AuthFailed = Test-IsAuthFailure -StdErr $catchStdErr
+            if ($result.AuthFailed) {
+                # Use the last non-empty stderr line as the user-facing error.
+                $authErrLines = $catchStdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+                $result.Error = if ($authErrLines) { $authErrLines[-1] } else { "Authentication failed" }
+            }
+            else {
+                $result.Error = $_.Exception.Message
+            }
+
+            # Still write a failure log
+            $safeIP = ConvertTo-SafeFileName $IPAddress
+            $logFileName = "unknown_${safeIP}_${SessionTimestamp}.log"
+            $logFilePath = Join-Path $LogDirectoryPath $logFileName
+            $result.LogFile = $logFilePath
+
+            $failLines = @(
+                $separator
+                " Device    : unknown ($IPAddress)"
+                " User      : $User"
+                " Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                " Status    : FAILED"
+                " Conn Tmout: ${Timeout}s"
+                " Cmd Tmout : ${CmdTimeoutSec}s"
+                " OS Type  : $OSType"
+                " PTY      : $ptyFlag"
+                $separator
+                ""
+                "ERROR: $($result.Error)"
+            )
+
+            if ($null -ne $stdOutBuilder -and $stdOutBuilder.Length -gt 0) {
+                $failLines += ""
+                $failLines += "$thinSep PARTIAL OUTPUT (before failure) $thinSep"
+                $failLines += $stdOutBuilder.ToString()
+            }
+
+            # Always append SSH diagnostics when available — critical for troubleshooting
+            # any failure, including auth failures, host-key errors, and connectivity issues.
+            if (-not [string]::IsNullOrWhiteSpace($catchStdErr)) {
+                $failLines += ""
+                $failLines += "$thinSep SSH ERRORS / DIAGNOSTICS $thinSep"
+                $failLines += $catchStdErr
+            }
+
+            if ($LogOutputEnabled) {
+                Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
+            }
+
+            break   # Error handled — exit the PTY retry loop
+        }
+        finally {
+            # Per-iteration cleanup: release process, event, and runspace resources.
+            # On a stty-triggered retry (continue), this runs before the next iteration.
+            try {
+                if ($null -ne $errEvent) {
+                    Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
                 }
             }
-            $result.AuthFailed = Test-IsAuthFailure -StdErr $stdErr
-        } else {
-            $result.Status = "Success"
-        }
+            catch {}
 
-        # Parse hostname from the device prompt in captured output
-        $deviceName = Get-HostnameFromPrompt -Output $stdOut
-        if ([string]::IsNullOrWhiteSpace($deviceName)) {
-            $deviceName = "unknown"
-            Write-Verbose "Could not parse hostname from prompt for $IPAddress - using 'unknown'"
-        }
-        $result.DeviceName = $deviceName
+            try {
+                if ($null -ne $proc) {
+                    if (-not $proc.HasExited) { $proc.Kill() }
+                    $proc.Dispose()
+                }
+            }
+            catch {
+                Write-Verbose "Process cleanup for $IPAddress : $($_.Exception.Message)"
+            }
 
-        # Build log filename now that we know the hostname
-        $safeDevice = ConvertTo-SafeFileName $deviceName
-        $safeIP = ConvertTo-SafeFileName $IPAddress
-        $logFileName = "${safeDevice}_${safeIP}_${timestamp}.log"
-        $logFilePath = Join-Path $LogDirectory $logFileName
-        $result.LogFile = $logFilePath
-
-        # Build log content using string array (avoids here-string indentation issues)
-        $logLines = @(
-            $separator
-            " Device    : $deviceName ($IPAddress)"
-            " User      : $User"
-            " Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-            " Status    : $($result.Status)"
-            " Conn Tmout: ${Timeout}s"
-            " Cmd Tmout : ${CmdTimeoutSec}s"
-            " OS Type  : $OSType"
-            " PTY      : $ptyFlag"
-            $separator
-            ""
-            "$thinSep COMMANDS SENT $thinSep"
-            ($CommandList -join "`r`n")
-            ""
-            "$thinSep DEVICE OUTPUT $thinSep"
-            $stdOut
-        )
-
-        if (-not [string]::IsNullOrWhiteSpace($stdErr)) {
-            $logLines += ""
-            $logLines += "$thinSep SSH ERRORS / DIAGNOSTICS $thinSep"
-            $logLines += $stdErr
-        }
-
-        if ($LogEnabled) {
-            Set-Content -Path $logFilePath -Value ($logLines -join "`r`n") -Encoding UTF8
-        }
-
-        break   # Success — exit the PTY retry loop
-    }
-    catch {
-        $result.Status     = "Failed"
-        $result.DeviceName = "unknown"
-
-        # Read whatever stderr was collected before the exception was thrown.
-        # SSH auth rejection ("Permission denied") appears here even when the
-        # exception path is taken instead of the normal exit-code path.
-        $catchStdErr = if ($null -ne $stdErrBuilder) { $stdErrBuilder.ToString().Trim() } else { "" }
-
-        # Auth failure takes priority over the exception message for both
-        # $result.Error and $result.AuthFailed.
-        $result.AuthFailed = Test-IsAuthFailure -StdErr $catchStdErr
-        if ($result.AuthFailed) {
-            # Use the last non-empty stderr line as the user-facing error.
-            $authErrLines = $catchStdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-            $result.Error = if ($authErrLines) { $authErrLines[-1] } else { "Authentication failed" }
-        }
-        else {
-            $result.Error = $_.Exception.Message
-        }
-
-        # Still write a failure log
-        $safeIP      = ConvertTo-SafeFileName $IPAddress
-        $logFileName = "unknown_${safeIP}_${timestamp}.log"
-        $logFilePath = Join-Path $LogDirectory $logFileName
-        $result.LogFile = $logFilePath
-
-        $failLines = @(
-            $separator
-            " Device    : unknown ($IPAddress)"
-            " User      : $User"
-            " Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-            " Status    : FAILED"
-            " Conn Tmout: ${Timeout}s"
-            " Cmd Tmout : ${CmdTimeoutSec}s"
-            " OS Type  : $OSType"
-            " PTY      : $ptyFlag"
-            $separator
-            ""
-            "ERROR: $($result.Error)"
-        )
-
-        if ($null -ne $stdOutBuilder -and $stdOutBuilder.Length -gt 0) {
-            $failLines += ""
-            $failLines += "$thinSep PARTIAL OUTPUT (before failure) $thinSep"
-            $failLines += $stdOutBuilder.ToString()
-        }
-
-        # Always append SSH diagnostics when available — critical for troubleshooting
-        # any failure, including auth failures, host-key errors, and connectivity issues.
-        if (-not [string]::IsNullOrWhiteSpace($catchStdErr)) {
-            $failLines += ""
-            $failLines += "$thinSep SSH ERRORS / DIAGNOSTICS $thinSep"
-            $failLines += $catchStdErr
-        }
-
-        if ($LogEnabled) {
-            Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
-        }
-
-        break   # Error handled — exit the PTY retry loop
-    }
-    finally {
-        # Per-iteration cleanup: release process, event, and runspace resources.
-        # On a stty-triggered retry (continue), this runs before the next iteration.
-        try {
-            if ($null -ne $errEvent) {
-                Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+            try {
+                if ($null -ne $readerRunspace) { $readerRunspace.Dispose() }
+            }
+            catch {
+                Write-Verbose "Reader runspace cleanup for $IPAddress : $($_.Exception.Message)"
             }
         }
-        catch {}
-
-        try {
-            if ($null -ne $proc) {
-                if (-not $proc.HasExited) { $proc.Kill() }
-                $proc.Dispose()
-            }
-        }
-        catch {
-            Write-Verbose "Process cleanup for $IPAddress : $($_.Exception.Message)"
-        }
-
-        try {
-            if ($null -ne $readerRunspace) { $readerRunspace.Dispose() }
-        }
-        catch {
-            Write-Verbose "Reader runspace cleanup for $IPAddress : $($_.Exception.Message)"
-        }
-    }
     }   # end of PTY retry loop
 
     $sw.Stop()
@@ -1570,7 +1632,7 @@ function Invoke-SSHSession {
 # ---------------------------------------------
 if ($CompressOnly) {
     Write-Host ""
-    Write-Host "Compress-only mode - archiving existing output directories." -ForegroundColor Cyan
+    Write-C "Compress-only mode - archiving existing output directories." -Color Cyan
     Invoke-CompressOutput -OutputDirectories @($LogDirectory, $JsonDirectory, $NetcortexDirectory) -Cleanup $DeleteAfterCompress
     Write-Host ""
     exit 0
@@ -1581,12 +1643,12 @@ if ($CompressOnly) {
 # ---------------------------------------------
 $devCountStr = "$($devices.Count)".PadRight(37)
 $osBreakdownLines = @($uniqueOSTypes | ForEach-Object {
-    $osName = $_; "$osName($(@($devices | Where-Object { $_.OS -eq $osName }).Count))"
-})
+        $osName = $_; "$osName($(@($devices | Where-Object { $_.OS -eq $osName }).Count))"
+    })
 $cmdDirStr = $CommandsDirectory
 if ($cmdDirStr.Length -gt 37) { $cmdDirStr = $cmdDirStr.Substring(0, 34) + "..." }
 $cmdDirStr = $cmdDirStr.PadRight(37)
-$timeoutStr    = "${TimeoutSeconds}s".PadRight(37)
+$timeoutStr = "${TimeoutSeconds}s".PadRight(37)
 $cmdTimeoutStr = "${CommandTimeoutSeconds}s".PadRight(37)
 $iniTimeoutStr = "${InitialPromptTimeoutSeconds}s".PadRight(37)
 $ptyStr = if ($AllocatePTY) { "Enabled (-tt)" } else { "Auto (-T, fallback -tt)" }
@@ -1603,151 +1665,594 @@ if ($LogEnabled) {
     $logDirStr = $LogDirectory
     if ($logDirStr.Length -gt 37) { $logDirStr = $logDirStr.Substring(0, 34) + "..." }
     $logDirStr = $logDirStr.PadRight(37)
-} else { $logDirStr = "Disabled".PadRight(37) }
+}
+else { $logDirStr = "Disabled".PadRight(37) }
 if ($JsonEnabled) {
     $jsonDirStr = $JsonDirectory
     if ($jsonDirStr.Length -gt 37) { $jsonDirStr = $jsonDirStr.Substring(0, 34) + "..." }
     $jsonDirStr = $jsonDirStr.PadRight(37)
-} else { $jsonDirStr = "Disabled".PadRight(37) }
+}
+else { $jsonDirStr = "Disabled".PadRight(37) }
 if ($NetcortexEnabled) {
     $netcortexDirStr = $NetcortexDirectory
     if ($netcortexDirStr.Length -gt 37) { $netcortexDirStr = $netcortexDirStr.Substring(0, 34) + "..." }
     $netcortexDirStr = $netcortexDirStr.PadRight(37)
-} else { $netcortexDirStr = "Disabled".PadRight(37) }
+}
+else { $netcortexDirStr = "Disabled".PadRight(37) }
 
 Write-Host ""
-Write-Host "+==================================================+" -ForegroundColor Gray
-Write-Host "|       SSH Network Command Runner - Starting      |" -ForegroundColor Gray
-Write-Host "+==================================================+" -ForegroundColor Gray
-Write-Host "|  Devices  : ${devCountStr}|" -ForegroundColor Gray
+Write-C "+==================================================+" -Color Gray
+Write-C "|       SSH Network Command Runner - Starting      |" -Color Gray
+Write-C "+==================================================+" -Color Gray
+Write-C "|  Devices  : ${devCountStr}|" -Color Gray
 for ($i = 0; $i -lt $osBreakdownLines.Count; $i++) {
     $label = if ($i -eq 0) { "|  OS Types : " } else { "|             " }
     $value = $osBreakdownLines[$i]
     if ($value.Length -gt 37) { $value = $value.Substring(0, 34) + "..." }
     $value = $value.PadRight(37)
-    Write-Host "${label}${value}|" -ForegroundColor Gray
+    Write-C "${label}${value}|" -Color Gray
 }
-Write-Host "|  Cmd Dir  : ${cmdDirStr}|" -ForegroundColor Gray
-Write-Host "|  Timeout  : ${timeoutStr}|" -ForegroundColor Gray
-Write-Host "|  Cmd Tmout: ${cmdTimeoutStr}|" -ForegroundColor Gray
-Write-Host "|  Ini Tmout: ${iniTimeoutStr}|" -ForegroundColor Gray
-Write-Host "|  PTY Mode : ${ptyStr}|" -ForegroundColor Gray
-Write-Host "|  Ping Test: ${pingStr}|" -ForegroundColor Gray
-Write-Host "|  SSH Creds: ${credLabelStr}|" -ForegroundColor Gray
-Write-Host "|  Compress : ${compressStr}|" -ForegroundColor Gray
-Write-Host "|  Log Dir  : ${logDirStr}|" -ForegroundColor Gray
-Write-Host "|  JSON Dir : ${jsonDirStr}|" -ForegroundColor Gray
-Write-Host "|  Netcortex: ${netcortexDirStr}|" -ForegroundColor Gray
+Write-C "|  Cmd Dir  : ${cmdDirStr}|" -Color Gray
+Write-C "|  Timeout  : ${timeoutStr}|" -Color Gray
+Write-C "|  Cmd Tmout: ${cmdTimeoutStr}|" -Color Gray
+Write-C "|  Ini Tmout: ${iniTimeoutStr}|" -Color Gray
+Write-C "|  PTY Mode : ${ptyStr}|" -Color Gray
+Write-C "|  Ping Test: ${pingStr}|" -Color Gray
+Write-C "|  SSH Creds: ${credLabelStr}|" -Color Gray
+Write-C "|  Compress : ${compressStr}|" -Color Gray
+Write-C "|  Log Dir  : ${logDirStr}|" -Color Gray
+Write-C "|  JSON Dir : ${jsonDirStr}|" -Color Gray
+Write-C "|  Netcortex: ${netcortexDirStr}|" -Color Gray
+$parallelStr = if ($MaxParallelJobs -le 1) { "Sequential" } else { "$MaxParallelJobs concurrent" }
+$parallelStr = $parallelStr.PadRight(37)
+Write-C "|  Parallel : ${parallelStr}|" -Color Gray
 if ($ExtraSSHOptions.Count -gt 0) {
     $sshOptsStr = ($ExtraSSHOptions -join " ")
     if ($sshOptsStr.Length -gt 37) { $sshOptsStr = $sshOptsStr.Substring(0, 34) + "..." }
     $sshOptsStr = $sshOptsStr.PadRight(37)
-    Write-Host "|  SSH Opts : ${sshOptsStr}|" -ForegroundColor Gray
+    Write-C "|  SSH Opts : ${sshOptsStr}|" -Color Gray
 }
-Write-Host "+==================================================+" -ForegroundColor Gray
+Write-C "+==================================================+" -Color Gray
 Write-Host ""
 
-$results        = [System.Collections.Generic.List[PSCustomObject]]::new()
-$deviceNum      = 0
+$results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $authRetryCount = 0
 $maxAuthRetries = 3
 
-foreach ($device in $devices) {
-    $deviceNum++
-    $ip = $device.IP
-    $os = $device.OS
-    Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ($os) ... " -NoNewline
+# Helper: print device result status on the main thread.
+# In table mode (-TableMode), outputs: "Status    | Time   | Detail" columns.
+# In inline mode (default), outputs: "OK (hostname) [20.0s]" style.
+function Write-DeviceResult {
+    param(
+        [string]$Prefix,
+        [PSCustomObject]$Result,
+        [ref]$AuthRetryCount,
+        [int]$MaxAuthRetries,
+        [ref]$CredentialsSaved,
+        [string]$CredLabel,
+        [string]$User,
+        [string]$Pass,
+        [switch]$TableMode,
+        [int]$HostnameWidth = 16
+    )
 
-    # Look up commands, paging, PTY, and exit sequence for this device's OS
-    $commands = $commandsByOS[$os]
-    $osProfile = $validOSTypes[$os]
-    $pagingCmds = @($osProfile.PagingCommand)
-    $exitCmds = $osProfile.ExitCommands
-    $devicePTY = $AllocatePTY -or $osProfile.RequirePTY
-    $interactivePattern = $osProfile.InteractivePattern
-    $sendNewline = $osProfile.SendInitialNewline
-
-    # Pre-connection ping test: skip unreachable devices immediately.
-    if ($PingTest) {
-        $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
-        if (-not $pingResult) {
-            Write-Host "SKIPPED (no ping response)" -ForegroundColor Yellow
-            $results.Add([PSCustomObject]@{
-                IPAddress      = $ip
-                DeviceName     = "unknown"
-                Status         = "Skipped"
-                LogFile        = ""
-                Error          = "No ping response - device unreachable"
-                AuthFailed     = $false
-                Duration       = [TimeSpan]::Zero
-                Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-                CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
-            })
-            continue
-        }
-    }
-
-    $sessionResult = Invoke-SSHSession `
-        -IPAddress             $ip `
-        -User                  $username `
-        -CommandList           $commands `
-        -Timeout               $TimeoutSeconds `
-        -SSHOptions            $ExtraSSHOptions `
-        -CmdDelayMs            $CommandDelayMs `
-        -CmdTimeoutSec         $CommandTimeoutSeconds `
-        -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds `
-        -AllocatePTY           $devicePTY `
-        -PagingCommands        $pagingCmds `
-        -ExitCommands          $exitCmds `
-        -OSType                $os `
-        -InteractivePattern    $interactivePattern `
-        -SendInitialNewline    $sendNewline
-
-    if ($sessionResult.Status -eq "Success") {
-        Write-Host "OK " -ForegroundColor Green -NoNewline
-        Write-Host "($($sessionResult.DeviceName)) [$($sessionResult.Duration.TotalSeconds.ToString('0.0'))s]"
-
-        # Persist credentials to Credential Manager after the first verified success.
-        if (-not $credentialsSaved) {
-            if ([CredentialManager]::WriteCredential($CredentialLabel, $username, $password)) {
-                Write-Verbose "Credentials saved to Credential Manager (label: $CredentialLabel)."
+    # Credential save and auth counter logic (shared by both modes)
+    if ($Result.Status -eq "Success") {
+        if (-not $CredentialsSaved.Value) {
+            if ([CredentialManager]::WriteCredential($CredLabel, $User, $Pass)) {
+                Write-Verbose "Credentials saved to Credential Manager (label: $CredLabel)."
             }
-            $credentialsSaved = $true
+            $CredentialsSaved.Value = $true
         }
-        $authRetryCount = 0   # reset consecutive auth failure counter on any success
+        $AuthRetryCount.Value = 0
     }
-    elseif ($sessionResult.AuthFailed) {
-        $authRetryCount++
-        Write-Host "FAILED: " -ForegroundColor Red -NoNewline
-        Write-Host "Authentication rejected ($authRetryCount of $maxAuthRetries consecutive)" -ForegroundColor DarkRed
+    elseif ($Result.AuthFailed) {
+        $AuthRetryCount.Value++
+    }
+    elseif ($Result.Status -ne "Cancelled") {
+        $AuthRetryCount.Value = 0
+    }
 
-        if ($authRetryCount -ge $maxAuthRetries) {
-            $results.Add($sessionResult)
-            Write-Host ""
-            Write-Host "  ERROR: Authentication rejected on $maxAuthRetries consecutive devices. Aborting." -ForegroundColor Red
-            Write-Host "  This usually indicates expired or incorrect credentials." -ForegroundColor Red
-            try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
-            $password = $null
-            [System.GC]::Collect()
-            break   # exit the foreach device loop — proceed to summary
+    if ($TableMode) {
+        $timeFmt  = $Result.Duration.TotalSeconds.ToString('0.00').PadLeft(6)
+        $hostname = if ($Result.DeviceName -and $Result.DeviceName -ne 'unknown') { $Result.DeviceName } else { "" }
+        $hostFmt  = $hostname.PadRight($HostnameWidth)
+        switch ($Result.Status) {
+            "Success" {
+                Write-C -Text "OK".PadRight(9) -Color Green -NoNewline
+                Write-C -Text " | $timeFmt | $hostFmt |" -Color DarkGray
+            }
+            "Skipped" {
+                Write-C -Text "SKIPPED".PadRight(9) -Color Orange -NoNewline
+                Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
+            }
+            "Cancelled" {
+                Write-C -Text "CANCELLED" -Color Yellow -NoNewline
+                Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
+            }
+            "Failed" {
+                $reason = if ($Result.AuthFailed) {
+                    "Auth rejected ($($AuthRetryCount.Value) of $MaxAuthRetries)"
+                } else { $Result.Error }
+                Write-C -Text "FAILED".PadRight(9) -Color Red -NoNewline
+                Write-C -Text " | $timeFmt | $hostFmt | " -Color DarkGray -NoNewline
+                Write-C -Text "$reason" -Color DarkRed
+            }
+            default {
+                Write-C -Text "UNKNOWN".PadRight(9) -Color DarkGray -NoNewline
+                Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
+            }
         }
     }
     else {
-        Write-Host "FAILED: " -ForegroundColor Red -NoNewline
-        Write-Host "$($sessionResult.Error)" -ForegroundColor DarkRed
-        # Non-auth failures (timeouts, connectivity) reset the consecutive auth counter
-        # since they break the streak of auth rejections.
-        $authRetryCount = 0
+        # Inline format (sequential mode)
+        if ($Prefix) { [Console]::Write($Prefix) }
+        switch ($Result.Status) {
+            "Success" {
+                Write-C -Text "OK " -Color Green -NoNewline
+                [Console]::WriteLine("($($Result.DeviceName)) [$($Result.Duration.TotalSeconds.ToString('0.0'))s]")
+            }
+            "Cancelled" {
+                Write-C -Text "CANCELLED" -Color Yellow
+            }
+            default {
+                if ($Result.AuthFailed) {
+                    Write-C -Text "FAILED: " -Color Red -NoNewline
+                    Write-C -Text "Authentication rejected ($($AuthRetryCount.Value) of $MaxAuthRetries consecutive)" -Color DarkRed
+                }
+                else {
+                    Write-C -Text "FAILED: " -Color Red -NoNewline
+                    Write-C -Text "$($Result.Error)" -Color DarkRed
+                }
+            }
+        }
+    }
+}
+
+if ($MaxParallelJobs -le 1) {
+    # -----------------------------------------------------------------
+    # SEQUENTIAL MODE — Ctrl+C breaks the foreach naturally in PS 5.1;
+    # execution falls through to summary/cleanup.
+    # -----------------------------------------------------------------
+    $deviceNum = 0
+    foreach ($device in $devices) {
+        $deviceNum++
+        $ip = $device.IP
+        $os = $device.OS
+        Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ($os) ... " -NoNewline
+
+        $commands = $commandsByOS[$os]
+        $osProfile = $validOSTypes[$os]
+        $pagingCmds = @($osProfile.PagingCommand)
+        $exitCmds = $osProfile.ExitCommands
+        $devicePTY = $AllocatePTY -or $osProfile.RequirePTY
+        $interactivePattern = $osProfile.InteractivePattern
+        $sendNewline = $osProfile.SendInitialNewline
+
+        if ($PingTest) {
+            $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
+            if (-not $pingResult) {
+                Write-C "SKIPPED (no ping response)" -Color Yellow
+                $results.Add([PSCustomObject]@{
+                        IPAddress      = $ip
+                        DeviceName     = "unknown"
+                        Status         = "Skipped"
+                        LogFile        = ""
+                        Error          = "No ping response - device unreachable"
+                        AuthFailed     = $false
+                        Duration       = [TimeSpan]::Zero
+                        Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                        CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                    })
+                continue
+            }
+        }
+
+        $sessionResult = Invoke-SSHSession `
+            -IPAddress             $ip `
+            -User                  $username `
+            -CommandList           $commands `
+            -Timeout               $TimeoutSeconds `
+            -SSHOptions            $ExtraSSHOptions `
+            -CmdDelayMs            $CommandDelayMs `
+            -CmdTimeoutSec         $CommandTimeoutSeconds `
+            -InitialCmdTimeoutSec  $InitialPromptTimeoutSeconds `
+            -AllocatePTY           $devicePTY `
+            -PagingCommands        $pagingCmds `
+            -ExitCommands          $exitCmds `
+            -OSType                $os `
+            -InteractivePattern    $interactivePattern `
+            -SendInitialNewline    $sendNewline `
+            -AskPassScriptPath     $askPassScript `
+            -SessionTimestamp      $timestamp `
+            -LogDirectoryPath      $LogDirectory `
+            -LogOutputEnabled      $LogEnabled
+
+        Write-DeviceResult -Prefix "" -Result $sessionResult `
+            -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
+            -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
+            -User $username -Pass $password
+
+        if ($sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
+            $results.Add($sessionResult)
+            Write-Host ""
+            Write-C "  ERROR: Authentication rejected on $maxAuthRetries consecutive devices. Aborting." -Color Red
+            Write-C "  This usually indicates expired or incorrect credentials." -Color Red
+            try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            $password = $null
+            [System.GC]::Collect()
+            break
+        }
+
+        $results.Add($sessionResult)
+    }
+}
+else {
+    # -----------------------------------------------------------------
+    # PARALLEL MODE — RunspacePool-based concurrent device processing
+    # -----------------------------------------------------------------
+    Write-C "Starting parallel execution ($MaxParallelJobs concurrent jobs)..." -Color Cyan
+    Write-Host ""
+
+    # Build InitialSessionState with all helper functions needed by Invoke-SSHSession
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $scriptContent = Get-Content -Path (Join-Path $_scriptRoot "ssh-cmd-runner.ps1") -Raw
+
+    # Extract function definitions by name and inject them into the session state
+    $functionNames = @(
+        'Test-IsAuthFailure',
+        'Get-HostnameFromPrompt',
+        'ConvertTo-SafeFileName',
+        'Read-UntilPrompt',
+        'Invoke-SSHSession'
+    )
+    foreach ($fnName in $functionNames) {
+        $fnBody = (Get-Item "function:$fnName").ScriptBlock
+        $entry = [System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($fnName, $fnBody.ToString())
+        $iss.Commands.Add($entry)
     }
 
-    $results.Add($sessionResult)
+    # Create and open the RunspacePool
+    $pool = [RunspaceFactory]::CreateRunspacePool(1, $MaxParallelJobs, $iss, $Host)
+    $pool.Open()
+
+    $jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $completedCount = 0
+    $ESC = $ESC_CHAR
+
+    # totalLines tracks how many device lines have been printed so far;
+    # each job's LineIndex records which line it occupies (1-based from top).
+    # ANSI relative escapes (move up N / move down N) update lines in-place.
+    $totalLines = 0
+
+    # Pre-compute column widths for the device table.
+    $numWidth = "$($devices.Count)".Length
+    $maxIPLen = [Math]::Max(2, ($devices | ForEach-Object { $_.IP.Length } | Measure-Object -Maximum).Maximum)
+    $maxOSLen = [Math]::Max(2, ($devices | ForEach-Object { $_.OS.Length } | Measure-Object -Maximum).Maximum)
+    $numColW = $numWidth * 2 + 1                          # "N/N" width
+    $statusW = 9                                           # "CANCELLED" = widest
+    $timeW = 6                                           # "999.99"
+
+    # Print table header
+    $hdrNum = "#".PadLeft($numColW)
+    $hdrIP = "IP".PadRight($maxIPLen)
+    $hdrOS = "OS".PadRight($maxOSLen)
+    $hdrStatus = "Status".PadRight($statusW)
+    $hdrTime = "Time".PadLeft($timeW)
+    $hdrHost = "Hostname".PadRight($HostnameColumnWidth)
+    Write-C " $hdrNum | $hdrIP | $hdrOS | $hdrStatus | $hdrTime | $hdrHost | Reason" -Color DarkGray
+    $sepNum = "-" * ($numColW + 1)
+    $sepIP = "-" * $maxIPLen
+    $sepOS = "-" * $maxOSLen
+    $sepStatus = "-" * $statusW
+    $sepTime = "-" * $timeW
+    $sepHost = "-" * $HostnameColumnWidth
+    Write-C "$sepNum-+-$sepIP-+-$sepOS-+-$sepStatus-+-$sepTime-+-$sepHost-+--------" -Color DarkGray
+    $totalLines += 2   # header + separator count toward line tracking
+
+    # Build a queue of devices to dispatch on-demand as slots open up.
+    # This keeps the console focused near active work instead of dumping
+    # hundreds of blank lines upfront.
+    $deviceQueue = [System.Collections.Generic.Queue[PSCustomObject]]::new()
+    $deviceNum = 0
+    foreach ($device in $devices) {
+        $deviceNum++
+        $deviceQueue.Enqueue([PSCustomObject]@{
+                DeviceNum = $deviceNum
+                IP        = $device.IP
+                OS        = $device.OS
+            })
+    }
+
+    # Intercept Ctrl+C as a keypress instead of an exception so we can
+    # update table lines, print the interrupt message, and reach the summary.
+    [Console]::TreatControlCAsInput = $true
+
+    # Unified dispatch + poll loop: dispatch when slots are free, collect when jobs complete
+    $authAbort = $false
+    $userInterrupted = $false
+    while ($deviceQueue.Count -gt 0 -or @($jobs | Where-Object { -not $_.Completed }).Count -gt 0) {
+
+        # Check for Ctrl+C keypress
+        if ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq 'C' -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+                $userInterrupted = $true
+
+                # Update in-place status for running jobs
+                foreach ($job in @($jobs | Where-Object { -not $_.Completed })) {
+                    try { $job.PowerShell.Stop() } catch {}
+                    $job.Completed = $true
+                    $cancelResult = [PSCustomObject]@{
+                        IPAddress      = $job.IP
+                        DeviceName     = "unknown"
+                        Status         = "Cancelled"
+                        LogFile        = ""
+                        Error          = "User interrupt"
+                        AuthFailed     = $false
+                        Duration       = [TimeSpan]::Zero
+                        Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                        CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                    }
+                    $linesUp = $totalLines - $job.LineIndex + 1
+                    $col = $job.StatusCol + 1
+                    [Console]::Write("${ESC}[${linesUp}A${ESC}[${col}G")
+                    Write-DeviceResult -Result $cancelResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                        -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
+                        -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
+                        -User $username -Pass $password
+                    $linesDown = $linesUp - 1
+                    if ($linesDown -gt 0) {
+                        [Console]::Write("${ESC}[${linesDown}B")
+                    }
+                    $results.Add($cancelResult)
+                }
+
+                # Add cancelled entries for devices still in the queue
+                while ($deviceQueue.Count -gt 0) {
+                    $d = $deviceQueue.Dequeue()
+                    $results.Add([PSCustomObject]@{
+                            IPAddress      = $d.IP
+                            DeviceName     = "unknown"
+                            Status         = "Cancelled"
+                            LogFile        = ""
+                            Error          = "User interrupt"
+                            AuthFailed     = $false
+                            Duration       = [TimeSpan]::Zero
+                            Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                            CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                        })
+                }
+
+                Write-Host ""
+                Write-C "User interrupted processing with Ctrl+C." -Color Orange
+                break
+            }
+        }
+
+        # --- Dispatch: fill open slots from the device queue ---
+        $activeCount = @($jobs | Where-Object { -not $_.Completed }).Count
+        while ($deviceQueue.Count -gt 0 -and $activeCount -lt $MaxParallelJobs) {
+            $d = $deviceQueue.Dequeue()
+            $ip = $d.IP
+            $os = $d.OS
+
+            $commands = $commandsByOS[$os]
+            $osProfile = $validOSTypes[$os]
+            $pagingCmds = @($osProfile.PagingCommand)
+            $exitCmds = $osProfile.ExitCommands
+            $devicePTY = $AllocatePTY -or $osProfile.RequirePTY
+            $interactivePattern = $osProfile.InteractivePattern
+            $sendNewline = $osProfile.SendInitialNewline
+
+            # Print the device table row (status columns left blank until completion)
+            $paddedNum = "$($d.DeviceNum)".PadLeft($numWidth)
+            $paddedIP = $ip.PadRight($maxIPLen)
+            $paddedOS = $os.PadRight($maxOSLen)
+            $linePrefix = " $paddedNum/$($devices.Count) | $paddedIP | $paddedOS | "
+            $lineStatusCol = $linePrefix.Length
+            Write-C $linePrefix -Color DarkGray
+            $totalLines++
+            $lineIndex = $totalLines
+
+            # Pre-connection ping test
+            if ($PingTest) {
+                $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
+                if (-not $pingResult) {
+                    $skipResult = [PSCustomObject]@{
+                        IPAddress      = $ip
+                        DeviceName     = "unknown"
+                        Status         = "Skipped"
+                        LogFile        = ""
+                        Error          = "No ping response"
+                        AuthFailed     = $false
+                        Duration       = [TimeSpan]::Zero
+                        Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                        CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                    }
+                    $col = $lineStatusCol + 1
+                    [Console]::Write("${ESC}[1A${ESC}[${col}G")
+                    Write-DeviceResult -Result $skipResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                        -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
+                        -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
+                        -User $username -Pass $password
+                    $results.Add($skipResult)
+                    continue   # next device from queue (doesn't consume a slot)
+                }
+            }
+
+            $ps = [PowerShell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddCommand('Invoke-SSHSession')
+            [void]$ps.AddParameters(@{
+                    IPAddress            = $ip
+                    User                 = $username
+                    CommandList          = $commands
+                    Timeout              = $TimeoutSeconds
+                    SSHOptions           = $ExtraSSHOptions
+                    CmdDelayMs           = $CommandDelayMs
+                    CmdTimeoutSec        = $CommandTimeoutSeconds
+                    InitialCmdTimeoutSec = $InitialPromptTimeoutSeconds
+                    AllocatePTY          = $devicePTY
+                    PagingCommands       = $pagingCmds
+                    ExitCommands         = $exitCmds
+                    OSType               = $os
+                    InteractivePattern   = $interactivePattern
+                    SendInitialNewline   = $sendNewline
+                    AskPassScriptPath    = $askPassScript
+                    SessionTimestamp     = $timestamp
+                    LogDirectoryPath     = $LogDirectory
+                    LogOutputEnabled     = $LogEnabled
+                })
+
+            $asyncResult = $ps.BeginInvoke()
+            $jobs.Add([PSCustomObject]@{
+                    PowerShell  = $ps
+                    AsyncResult = $asyncResult
+                    DeviceNum   = $d.DeviceNum
+                    IP          = $ip
+                    OS          = $os
+                    Completed   = $false
+                    LineIndex   = $lineIndex
+                    StatusCol   = $lineStatusCol
+                })
+            $activeCount++
+        }
+
+        # --- Collect: check for completed jobs and update their lines in-place ---
+        foreach ($job in ($jobs | Where-Object { -not $_.Completed })) {
+            if ($job.AsyncResult.IsCompleted) {
+                $job.Completed = $true
+                $completedCount++
+
+                $sessionResult = $null
+                try {
+                    $jobOutput = $job.PowerShell.EndInvoke($job.AsyncResult)
+                    if ($jobOutput -and $jobOutput.Count -gt 0) {
+                        $sessionResult = $jobOutput[$jobOutput.Count - 1]
+                    }
+                }
+                catch {
+                    $sessionResult = [PSCustomObject]@{
+                        IPAddress      = $job.IP
+                        DeviceName     = "unknown"
+                        Status         = "Failed"
+                        LogFile        = ""
+                        Error          = "Runspace error: $($_.Exception.Message)"
+                        AuthFailed     = $false
+                        Duration       = [TimeSpan]::Zero
+                        Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                        CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                    }
+                }
+
+                if ($null -eq $sessionResult) {
+                    $sessionResult = [PSCustomObject]@{
+                        IPAddress      = $job.IP
+                        DeviceName     = "unknown"
+                        Status         = "Failed"
+                        LogFile        = ""
+                        Error          = "No result returned from runspace"
+                        AuthFailed     = $false
+                        Duration       = [TimeSpan]::Zero
+                        Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                        CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                    }
+                }
+
+                if ($job.PowerShell.HadErrors) {
+                    foreach ($err in $job.PowerShell.Streams.Error) {
+                        Write-Verbose "Runspace error for $($job.IP): $($err.Exception.Message)"
+                    }
+                }
+
+                # Jump cursor to the device's line and write status in-place
+                $linesUp = $totalLines - $job.LineIndex + 1
+                $col = $job.StatusCol + 1
+                [Console]::Write("${ESC}[${linesUp}A${ESC}[${col}G")
+                Write-DeviceResult -Result $sessionResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                    -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
+                    -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
+                    -User $username -Pass $password
+                # Write-DeviceResult emits a newline, moving cursor down 1.
+                # Return to the bottom line.
+                $linesDown = $linesUp - 1
+                if ($linesDown -gt 0) {
+                    [Console]::Write("${ESC}[${linesDown}B")
+                }
+
+                $results.Add($sessionResult)
+
+                if ($sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
+                    $authAbort = $true
+                }
+
+                try { $job.PowerShell.Dispose() } catch {}
+            }
+        }
+
+        # Auth abort — cancel running jobs and drain queue
+        if ($authAbort) {
+            foreach ($job in ($jobs | Where-Object { -not $_.Completed })) {
+                try { $job.PowerShell.Stop() } catch {}
+                $job.Completed = $true
+                try { $job.PowerShell.Dispose() } catch {}
+                $abortResult = [PSCustomObject]@{
+                    IPAddress      = $job.IP
+                    DeviceName     = "unknown"
+                    Status         = "Cancelled"
+                    LogFile        = ""
+                    Error          = "Auth abort"
+                    AuthFailed     = $false
+                    Duration       = [TimeSpan]::Zero
+                    Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                    CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                }
+                $linesUp = $totalLines - $job.LineIndex + 1
+                $col = $job.StatusCol + 1
+                [Console]::Write("${ESC}[${linesUp}A${ESC}[${col}G")
+                Write-DeviceResult -Result $abortResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                    -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
+                    -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
+                    -User $username -Pass $password
+                $linesDown = $linesUp - 1
+                if ($linesDown -gt 0) {
+                    [Console]::Write("${ESC}[${linesDown}B")
+                }
+                $results.Add($abortResult)
+            }
+            $deviceQueue.Clear()
+            Write-Host ""
+            Write-C "  ERROR: Authentication rejected on $maxAuthRetries consecutive devices. Aborting." -Color Red
+            Write-C "  This usually indicates expired or incorrect credentials." -Color Red
+            try { Remove-Item -Path $askPassDir -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            $password = $null
+            [System.GC]::Collect()
+            break
+        }
+
+        Start-Sleep -Milliseconds 200
+    }
+
+    # Restore default Ctrl+C behavior and clean up runspace resources
+    [Console]::TreatControlCAsInput = $false
+    foreach ($job in $jobs) {
+        if ($null -ne $job.PowerShell) {
+            try { $job.PowerShell.Stop() } catch {}
+            try { $job.PowerShell.Dispose() } catch {}
+        }
+    }
+    if ($null -ne $pool) {
+        try { $pool.Close() } catch {}
+        try { $pool.Dispose() } catch {}
+    }
 }
 
 # ---------------------------------------------
 # OUTPUT AGGREGATES
 # ---------------------------------------------
 $successResults = @($results | Where-Object { $_.Status -eq "Success" })
-$failedIPs      = @($results | Where-Object { $_.Status -eq "Failed" } | ForEach-Object { $_.IPAddress })
+$failedIPs = @($results | Where-Object { $_.Status -eq "Failed" } | ForEach-Object { $_.IPAddress })
 
 # ---------------------------------------------
 # NETCORTEX OUTPUT
@@ -1768,7 +2273,8 @@ if ($NetcortexEnabled) {
         $deviceOS = $deviceOSMap[$r.IPAddress]
         $ncCmds = if ($deviceOS -and $netcortexCommandsByOS.ContainsKey($deviceOS)) {
             $netcortexCommandsByOS[$deviceOS]
-        } else { $null }
+        }
+        else { $null }
 
         if ($ncCmds) {
             # Build case-insensitive lookup from command string -> CommandResult
@@ -1810,27 +2316,27 @@ if ($JsonEnabled) {
     # --- Session summary file (optional) ---
     if ($JsonSessionFileEnabled) {
         $sessionDoc = [ordered]@{
-            platform = $osPlatform
-            engine   = $psEngine
-            date     = $runDate
-            result   = [ordered]@{
+            platform           = $osPlatform
+            engine             = $psEngine
+            date               = $runDate
+            result             = [ordered]@{
                 total   = $results.Count
                 success = $successResults.Count
                 failed  = $failedIPs.Count
             }
-            devices  = [ordered]@{
+            devices            = [ordered]@{
                 count               = $results.Count
                 ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
                 failed_ip_addresses = @($failedIPs)
             }
             commands_directory = $CommandsDirectory
-            os_types = [ordered]@{}
+            os_types           = [ordered]@{}
         }
         foreach ($osKey in $uniqueOSTypes) {
             $sessionDoc.os_types[$osKey] = [ordered]@{
-                device_count = @($devices | Where-Object { $_.OS -eq $osKey }).Count
+                device_count  = @($devices | Where-Object { $_.OS -eq $osKey }).Count
                 command_count = $commandsByOS[$osKey].Count
-                commands = @($commandsByOS[$osKey])
+                commands      = @($commandsByOS[$osKey])
             }
         }
         $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
@@ -1840,7 +2346,7 @@ if ($JsonEnabled) {
     # --- Per-device JSON files (successful connections only) ---
     foreach ($r in $successResults) {
         $safeDevice = ConvertTo-SafeFileName $r.DeviceName
-        $safeIP     = ConvertTo-SafeFileName $r.IPAddress
+        $safeIP = ConvertTo-SafeFileName $r.IPAddress
         $devicePath = Join-Path $JsonDirectory "${safeDevice}_${safeIP}_${timestamp}.json"
 
         $deviceDoc = [ordered]@{
@@ -1865,31 +2371,38 @@ if ($JsonEnabled) {
 # ---------------------------------------------
 $successCount = @($results | Where-Object { $_.Status -eq "Success" }).Count
 $skippedCount = @($results | Where-Object { $_.Status -eq "Skipped" }).Count
-$failCount    = @($results | Where-Object { $_.Status -eq "Failed" }).Count
+$failCount = @($results | Where-Object { $_.Status -eq "Failed" }).Count
+$cancelledCount = @($results | Where-Object { $_.Status -eq "Cancelled" }).Count
 $failColor = if ($failCount -gt 0) { "Red" } else { "Gray" }
 
 $totalStr = "$($results.Count)".PadRight(36)
 $successStr = "$successCount".PadRight(36)
 $skippedStr = "$skippedCount".PadRight(36)
 $failStr = "$failCount".PadRight(36)
+$cancelledStr = "$cancelledCount".PadRight(36)
 
 Write-Host ""
-Write-Host "+==================================================+" -ForegroundColor Gray
-Write-Host "|                     SUMMARY                      |" -ForegroundColor Gray
-Write-Host "+==================================================+" -ForegroundColor Gray
-Write-Host "|  Total     : ${totalStr}|" -ForegroundColor Gray
+Write-C "+==================================================+" -Color Gray
+Write-C "|                     SUMMARY                      |" -Color Gray
+Write-C "+==================================================+" -Color Gray
+Write-C "|  Total     : ${totalStr}|" -Color Gray
 Write-Host "|  Succeeded : " -NoNewline
-Write-Host "${successStr}" -ForegroundColor Green -NoNewline
+Write-C "${successStr}" -Color Green -NoNewline
 Write-Host "|"
 if ($skippedCount -gt 0) {
     Write-Host "|  Skipped   : " -NoNewline
-    Write-Host "${skippedStr}" -ForegroundColor Yellow -NoNewline
+    Write-C "${skippedStr}" -Color Orange -NoNewline
     Write-Host "|"
 }
 Write-Host "|  Failed    : " -NoNewline
-Write-Host "${failStr}" -ForegroundColor $failColor -NoNewline
+Write-C "${failStr}" -Color $failColor -NoNewline
 Write-Host "|"
-Write-Host "+==================================================+" -ForegroundColor Gray
+if ($cancelledCount -gt 0) {
+    Write-Host "|  Cancelled : " -NoNewline
+    Write-C "${cancelledStr}" -Color Yellow -NoNewline
+    Write-Host "|"
+}
+Write-C "+==================================================+" -Color Gray
 
 # ---------------------------------------------
 # POST-RUN COMPRESSION
@@ -1901,7 +2414,7 @@ if ($CompressOutput) {
     if ($CompressWhen -eq 'SuccessOnly' -and $failedIPs.Count -gt 0) {
         $shouldCompress = $false
         Write-Host ""
-        Write-Host "Compression skipped: $($failedIPs.Count) device(s) failed (CompressWhen = SuccessOnly)." -ForegroundColor Yellow
+        Write-C "Compression skipped: $($failedIPs.Count) device(s) failed (CompressWhen = SuccessOnly)." -Color Yellow
     }
     if ($shouldCompress) {
         Invoke-CompressOutput -OutputDirectories @($LogDirectory, $JsonDirectory, $NetcortexDirectory) -Cleanup $DeleteAfterCompress
