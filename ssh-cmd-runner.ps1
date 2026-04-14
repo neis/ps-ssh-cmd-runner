@@ -233,7 +233,10 @@ param(
     [int]$HostnameColumnWidth = 16,
 
     [Parameter(Mandatory = $false, HelpMessage = "Add missing parameters to config.json using defaults from the example config, then exit")]
-    [switch]$UpdateConfig
+    [switch]$UpdateConfig,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Present an interactive menu to select which OS types to process before starting")]
+    [switch]$DeviceMenu
 )
 
 # ---------------------------------------------
@@ -329,6 +332,9 @@ if (Test-Path $configPath -PathType Leaf) {
     }
     if (-not $PSBoundParameters.ContainsKey('HostnameColumnWidth') -and $config.PSObject.Properties.Name -contains 'HostnameColumnWidth') {
         $HostnameColumnWidth = [int]$config.HostnameColumnWidth
+    }
+    if (-not $PSBoundParameters.ContainsKey('DeviceMenu') -and $config.PSObject.Properties.Name -contains 'DeviceMenu') {
+        $DeviceMenu = [bool]$config.DeviceMenu
     }
 }
 
@@ -525,8 +531,79 @@ if (-not $CompressOnly) {
         exit 1
     }
 
-    # Load per-OS command files for each OS type referenced in the device list
+    # Discover unique OS types from the device list
     $uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
+
+    # Interactive OS type selection menu
+    if ($DeviceMenu -and $uniqueOSTypes.Count -gt 1) {
+        $totalDeviceCount = $devices.Count
+        $maxOSLen = [Math]::Max(7, ($uniqueOSTypes | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum)
+        $numWidth = "$($uniqueOSTypes.Count)".Length
+
+        Write-Host ""
+        Write-C "  Select OS types to process:" -Color Cyan
+        Write-Host ""
+        $hdrNum   = "#".PadLeft($numWidth)
+        $hdrOS    = "OS Type".PadRight($maxOSLen)
+        Write-C "  $hdrNum  $hdrOS  Devices" -Color DarkGray
+        Write-C "  $('-' * $numWidth)  $('-' * $maxOSLen)  -------" -Color DarkGray
+        for ($i = 0; $i -lt $uniqueOSTypes.Count; $i++) {
+            $osName = $uniqueOSTypes[$i]
+            $count  = @($devices | Where-Object { $_.OS -eq $osName }).Count
+            $num    = "$($i + 1)".PadLeft($numWidth)
+            $padOS  = $osName.PadRight($maxOSLen)
+            Write-C "  $num  $padOS  $("$count".PadLeft(7))" -Color Gray
+        }
+        $allPad = "A".PadLeft($numWidth)
+        $allOS  = "All".PadRight($maxOSLen)
+        Write-C "  $allPad  $allOS  $("$totalDeviceCount".PadLeft(7))" -Color Gray
+        Write-Host ""
+
+        # Read and validate selection with retry loop
+        while ($true) {
+            $input = (Read-Host "  Selection (e.g. 1,2 or A)").Trim()
+            if ($input -eq '' -or $input.ToUpper() -eq 'A') {
+                break   # process all OS types
+            }
+
+            $nums = $input -split ',' | ForEach-Object { $_.Trim() }
+            $valid = $true
+            $selectedTypes = @()
+            foreach ($n in $nums) {
+                $idx = 0
+                if ([int]::TryParse($n, [ref]$idx) -and $idx -ge 1 -and $idx -le $uniqueOSTypes.Count) {
+                    $selectedTypes += $uniqueOSTypes[$idx - 1]
+                }
+                else {
+                    Write-C "  Invalid selection: '$n'. Enter numbers 1-$($uniqueOSTypes.Count) or A for all." -Color Orange
+                    $valid = $false
+                    break
+                }
+            }
+            if (-not $valid) { continue }
+
+            # Filter devices to selected OS types
+            $selectedTypes = @($selectedTypes | Sort-Object -Unique)
+            $devices = @($devices | Where-Object { $_.OS -in $selectedTypes })
+            $uniqueOSTypes = @($selectedTypes | Sort-Object)
+
+            if ($devices.Count -eq 0) {
+                Write-C "  No devices match the selected OS types. Exiting." -Color Red
+                exit 0
+            }
+
+            $skipped = $totalDeviceCount - $devices.Count
+            Write-Host ""
+            Write-C "  Selected $($devices.Count) device(s) across $($uniqueOSTypes.Count) OS type(s)." -Color Cyan
+            if ($skipped -gt 0) {
+                Write-C "  Skipped $skipped device(s) from unselected OS types." -Color DarkGray
+            }
+            break
+        }
+        Write-Host ""
+    }
+
+    # Load per-OS command files for each OS type referenced in the (possibly filtered) device list
     $commandsByOS = @{}
 
     foreach ($osType in $uniqueOSTypes) {
@@ -1792,12 +1869,48 @@ $results = [System.Collections.Generic.List[PSCustomObject]]::new()
 $authRetryCount = 0
 $maxAuthRetries = 3
 
-# Helper: print device result status on the main thread.
-# In table mode (-TableMode), outputs: "Status    | Time   | Detail" columns.
-# In inline mode (default), outputs: "OK (hostname) [20.0s]" style.
+# Pre-compute table column widths (shared by sequential and parallel modes)
+$numWidth = "$($devices.Count)".Length
+$maxIPLen = [Math]::Max(2, ($devices | ForEach-Object { $_.IP.Length } | Measure-Object -Maximum).Maximum)
+$maxOSLen = [Math]::Max(2, ($devices | ForEach-Object { $_.OS.Length } | Measure-Object -Maximum).Maximum)
+$numColW  = $numWidth * 2 + 1                          # "N/N" width
+$statusW  = 9                                           # "CANCELLED" = widest
+$timeW    = 6                                           # "999.99"
+$ESC      = $ESC_CHAR
+
+# Helper: print the device table header row and separator
+function Write-DeviceTableHeader {
+    $hdrNum    = "#".PadLeft($numColW)
+    $hdrIP     = "IP".PadRight($maxIPLen)
+    $hdrOS     = "OS".PadRight($maxOSLen)
+    $hdrStatus = "Status".PadRight($statusW)
+    $hdrTime   = "Time".PadLeft($timeW)
+    $hdrHost   = "Hostname".PadRight($HostnameColumnWidth)
+    Write-C " $hdrNum | $hdrIP | $hdrOS | $hdrStatus | $hdrTime | $hdrHost | Reason" -Color DarkGray
+    $sepNum    = "-" * ($numColW + 1)
+    $sepIP     = "-" * $maxIPLen
+    $sepOS     = "-" * $maxOSLen
+    $sepStatus = "-" * $statusW
+    $sepTime   = "-" * $timeW
+    $sepHost   = "-" * $HostnameColumnWidth
+    Write-C "$sepNum-+-$sepIP-+-$sepOS-+-$sepStatus-+-$sepTime-+-$sepHost-+--------" -Color DarkGray
+}
+
+# Helper: format and print a device table row prefix (everything before the status columns)
+function Write-DeviceTableRow {
+    param([int]$DeviceNum, [string]$IP, [string]$OS)
+    $paddedNum = "$DeviceNum".PadLeft($numWidth)
+    $paddedIP  = $IP.PadRight($maxIPLen)
+    $paddedOS  = $OS.PadRight($maxOSLen)
+    $prefix    = " $paddedNum/$($devices.Count) | $paddedIP | $paddedOS | "
+    Write-C $prefix -Color DarkGray -NoNewline
+    return $prefix.Length
+}
+
+# Helper: print device result status columns in table format.
+# Outputs: "STATUS | TIME | HOSTNAME | REASON" and handles credential/auth counter logic.
 function Write-DeviceResult {
     param(
-        [string]$Prefix,
         [PSCustomObject]$Result,
         [ref]$AuthRetryCount,
         [int]$MaxAuthRetries,
@@ -1805,11 +1918,10 @@ function Write-DeviceResult {
         [string]$CredLabel,
         [string]$User,
         [string]$Pass,
-        [switch]$TableMode,
         [int]$HostnameWidth = 16
     )
 
-    # Credential save and auth counter logic (shared by both modes)
+    # Credential save and auth counter logic
     if ($Result.Status -eq "Success") {
         if (-not $CredentialsSaved.Value) {
             if ([CredentialManager]::WriteCredential($CredLabel, $User, $Pass)) {
@@ -1826,73 +1938,48 @@ function Write-DeviceResult {
         $AuthRetryCount.Value = 0
     }
 
-    if ($TableMode) {
-        $timeFmt  = $Result.Duration.TotalSeconds.ToString('0.00').PadLeft(6)
-        $hostname = if ($Result.DeviceName -and $Result.DeviceName -ne 'unknown') { $Result.DeviceName } else { "" }
-        $hostFmt  = $hostname.PadRight($HostnameWidth)
-        switch ($Result.Status) {
-            "Success" {
-                Write-C -Text "OK".PadRight(9) -Color Green -NoNewline
-                Write-C -Text " | $timeFmt | $hostFmt |" -Color DarkGray
-            }
-            "Skipped" {
-                Write-C -Text "SKIPPED".PadRight(9) -Color Orange -NoNewline
-                Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
-            }
-            "Cancelled" {
-                Write-C -Text "CANCELLED" -Color Yellow -NoNewline
-                Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
-            }
-            "Failed" {
-                $reason = if ($Result.AuthFailed) {
-                    "Auth rejected ($($AuthRetryCount.Value) of $MaxAuthRetries)"
-                } else { $Result.Error }
-                Write-C -Text "FAILED".PadRight(9) -Color Red -NoNewline
-                Write-C -Text " | $timeFmt | $hostFmt | " -Color DarkGray -NoNewline
-                Write-C -Text "$reason" -Color DarkRed
-            }
-            default {
-                Write-C -Text "UNKNOWN".PadRight(9) -Color DarkGray -NoNewline
-                Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
-            }
+    $timeFmt  = $Result.Duration.TotalSeconds.ToString('0.00').PadLeft(6)
+    $hostname = if ($Result.DeviceName -and $Result.DeviceName -ne 'unknown') { $Result.DeviceName } else { "" }
+    $hostFmt  = $hostname.PadRight($HostnameWidth)
+    switch ($Result.Status) {
+        "Success" {
+            Write-C -Text "OK".PadRight(9) -Color Green -NoNewline
+            Write-C -Text " | $timeFmt | $hostFmt |" -Color DarkGray
         }
-    }
-    else {
-        # Inline format (sequential mode)
-        if ($Prefix) { [Console]::Write($Prefix) }
-        switch ($Result.Status) {
-            "Success" {
-                Write-C -Text "OK " -Color Green -NoNewline
-                [Console]::WriteLine("($($Result.DeviceName)) [$($Result.Duration.TotalSeconds.ToString('0.0'))s]")
-            }
-            "Cancelled" {
-                Write-C -Text "CANCELLED" -Color Yellow
-            }
-            default {
-                if ($Result.AuthFailed) {
-                    Write-C -Text "FAILED: " -Color Red -NoNewline
-                    Write-C -Text "Authentication rejected ($($AuthRetryCount.Value) of $MaxAuthRetries consecutive)" -Color DarkRed
-                }
-                else {
-                    Write-C -Text "FAILED: " -Color Red -NoNewline
-                    Write-C -Text "$($Result.Error)" -Color DarkRed
-                }
-            }
+        "Skipped" {
+            Write-C -Text "SKIPPED".PadRight(9) -Color Orange -NoNewline
+            Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
+        }
+        "Cancelled" {
+            Write-C -Text "CANCELLED" -Color Yellow -NoNewline
+            Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
+        }
+        "Failed" {
+            $reason = if ($Result.AuthFailed) {
+                "Auth rejected ($($AuthRetryCount.Value) of $MaxAuthRetries)"
+            } else { $Result.Error }
+            Write-C -Text "FAILED".PadRight(9) -Color Red -NoNewline
+            Write-C -Text " | $timeFmt | $hostFmt | " -Color DarkGray -NoNewline
+            Write-C -Text "$reason" -Color DarkRed
+        }
+        default {
+            Write-C -Text "UNKNOWN".PadRight(9) -Color DarkGray -NoNewline
+            Write-C -Text " | $timeFmt | $hostFmt | $($Result.Error)" -Color DarkGray
         }
     }
 }
 
 if ($MaxParallelJobs -le 1) {
     # -----------------------------------------------------------------
-    # SEQUENTIAL MODE — Ctrl+C breaks the foreach naturally in PS 5.1;
-    # execution falls through to summary/cleanup.
+    # SEQUENTIAL MODE — table output, devices processed one at a time
     # -----------------------------------------------------------------
+    Write-DeviceTableHeader
+
     $deviceNum = 0
     foreach ($device in $devices) {
         $deviceNum++
         $ip = $device.IP
         $os = $device.OS
-        Write-Host "[$deviceNum/$($devices.Count)] Connecting to $ip ($os) ... " -NoNewline
 
         $commands = $commandsByOS[$os]
         $osProfile = $validOSTypes[$os]
@@ -1902,21 +1989,28 @@ if ($MaxParallelJobs -le 1) {
         $interactivePattern = $osProfile.InteractivePattern
         $sendNewline = $osProfile.SendInitialNewline
 
+        # Print table row prefix
+        $null = Write-DeviceTableRow -DeviceNum $deviceNum -IP $ip -OS $os
+
         if ($PingTest) {
             $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
             if (-not $pingResult) {
-                Write-C "SKIPPED (no ping response)" -Color Yellow
-                $results.Add([PSCustomObject]@{
-                        IPAddress      = $ip
-                        DeviceName     = "unknown"
-                        Status         = "Skipped"
-                        LogFile        = ""
-                        Error          = "No ping response - device unreachable"
-                        AuthFailed     = $false
-                        Duration       = [TimeSpan]::Zero
-                        Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-                        CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
-                    })
+                $skipResult = [PSCustomObject]@{
+                    IPAddress      = $ip
+                    DeviceName     = "unknown"
+                    Status         = "Skipped"
+                    LogFile        = ""
+                    Error          = "No ping response"
+                    AuthFailed     = $false
+                    Duration       = [TimeSpan]::Zero
+                    Timestamp      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                    CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+                }
+                Write-DeviceResult -Result $skipResult -HostnameWidth $HostnameColumnWidth `
+                    -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
+                    -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
+                    -User $username -Pass $password
+                $results.Add($skipResult)
                 continue
             }
         }
@@ -1941,7 +2035,7 @@ if ($MaxParallelJobs -le 1) {
             -LogDirectoryPath      $LogDirectory `
             -LogOutputEnabled      $LogEnabled
 
-        Write-DeviceResult -Prefix "" -Result $sessionResult `
+        Write-DeviceResult -Result $sessionResult -HostnameWidth $HostnameColumnWidth `
             -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
             -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
             -User $username -Pass $password
@@ -1991,36 +2085,14 @@ else {
 
     $jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
     $completedCount = 0
-    $ESC = $ESC_CHAR
 
     # totalLines tracks how many device lines have been printed so far;
     # each job's LineIndex records which line it occupies (1-based from top).
     # ANSI relative escapes (move up N / move down N) update lines in-place.
     $totalLines = 0
 
-    # Pre-compute column widths for the device table.
-    $numWidth = "$($devices.Count)".Length
-    $maxIPLen = [Math]::Max(2, ($devices | ForEach-Object { $_.IP.Length } | Measure-Object -Maximum).Maximum)
-    $maxOSLen = [Math]::Max(2, ($devices | ForEach-Object { $_.OS.Length } | Measure-Object -Maximum).Maximum)
-    $numColW = $numWidth * 2 + 1                          # "N/N" width
-    $statusW = 9                                           # "CANCELLED" = widest
-    $timeW = 6                                           # "999.99"
-
     # Print table header
-    $hdrNum = "#".PadLeft($numColW)
-    $hdrIP = "IP".PadRight($maxIPLen)
-    $hdrOS = "OS".PadRight($maxOSLen)
-    $hdrStatus = "Status".PadRight($statusW)
-    $hdrTime = "Time".PadLeft($timeW)
-    $hdrHost = "Hostname".PadRight($HostnameColumnWidth)
-    Write-C " $hdrNum | $hdrIP | $hdrOS | $hdrStatus | $hdrTime | $hdrHost | Reason" -Color DarkGray
-    $sepNum = "-" * ($numColW + 1)
-    $sepIP = "-" * $maxIPLen
-    $sepOS = "-" * $maxOSLen
-    $sepStatus = "-" * $statusW
-    $sepTime = "-" * $timeW
-    $sepHost = "-" * $HostnameColumnWidth
-    Write-C "$sepNum-+-$sepIP-+-$sepOS-+-$sepStatus-+-$sepTime-+-$sepHost-+--------" -Color DarkGray
+    Write-DeviceTableHeader
     $totalLines += 2   # header + separator count toward line tracking
 
     # Build a queue of devices to dispatch on-demand as slots open up.
@@ -2070,7 +2142,7 @@ else {
                     $linesUp = $totalLines - $job.LineIndex + 1
                     $col = $job.StatusCol + 1
                     [Console]::Write("${ESC}[${linesUp}A${ESC}[${col}G")
-                    Write-DeviceResult -Result $cancelResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                    Write-DeviceResult -Result $cancelResult -HostnameWidth $HostnameColumnWidth `
                         -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
                         -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
                         -User $username -Pass $password
@@ -2119,12 +2191,8 @@ else {
             $sendNewline = $osProfile.SendInitialNewline
 
             # Print the device table row (status columns left blank until completion)
-            $paddedNum = "$($d.DeviceNum)".PadLeft($numWidth)
-            $paddedIP = $ip.PadRight($maxIPLen)
-            $paddedOS = $os.PadRight($maxOSLen)
-            $linePrefix = " $paddedNum/$($devices.Count) | $paddedIP | $paddedOS | "
-            $lineStatusCol = $linePrefix.Length
-            Write-C $linePrefix -Color DarkGray
+            $lineStatusCol = Write-DeviceTableRow -DeviceNum $d.DeviceNum -IP $ip -OS $os
+            [Console]::WriteLine("")   # advance to next line (Write-DeviceTableRow uses -NoNewline)
             $totalLines++
             $lineIndex = $totalLines
 
@@ -2145,7 +2213,7 @@ else {
                     }
                     $col = $lineStatusCol + 1
                     [Console]::Write("${ESC}[1A${ESC}[${col}G")
-                    Write-DeviceResult -Result $skipResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                    Write-DeviceResult -Result $skipResult -HostnameWidth $HostnameColumnWidth `
                         -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
                         -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
                         -User $username -Pass $password
@@ -2243,7 +2311,7 @@ else {
                 $linesUp = $totalLines - $job.LineIndex + 1
                 $col = $job.StatusCol + 1
                 [Console]::Write("${ESC}[${linesUp}A${ESC}[${col}G")
-                Write-DeviceResult -Result $sessionResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                Write-DeviceResult -Result $sessionResult -HostnameWidth $HostnameColumnWidth `
                     -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
                     -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
                     -User $username -Pass $password
@@ -2284,7 +2352,7 @@ else {
                 $linesUp = $totalLines - $job.LineIndex + 1
                 $col = $job.StatusCol + 1
                 [Console]::Write("${ESC}[${linesUp}A${ESC}[${col}G")
-                Write-DeviceResult -Result $abortResult -TableMode -HostnameWidth $HostnameColumnWidth `
+                Write-DeviceResult -Result $abortResult -HostnameWidth $HostnameColumnWidth `
                     -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
                     -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
                     -User $username -Pass $password

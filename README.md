@@ -111,7 +111,8 @@ Copy `[example] config.json` from the `Examples/` directory to `config.json` and
   "CompressWhen": "Always",
   "DeleteAfterCompress": false,
   "MaxParallelJobs": 1,
-  "HostnameColumnWidth": 16
+  "HostnameColumnWidth": 16,
+  "DeviceMenu": false
 }
 ```
 
@@ -272,6 +273,41 @@ Compares your `config.json` against `Examples/[example] config.json` and adds an
 parameters with their default values. Existing settings are never modified or removed. Use
 this after updating the script to pick up new configuration options without manually editing
 your config file. The script prints a summary of added parameters and exits.
+
+### DeviceMenu `[switch]`
+
+Present an interactive menu to select which OS types to process before the run begins.
+When enabled, the script displays a numbered list of OS types found in the device list
+along with device counts. Enter one or more numbers (comma-separated) to process only
+those types, or `A` to process all. Devices belonging to unselected OS types are skipped.
+The menu only appears when the device list contains more than one OS type. Default: `$false`
+
+## DEVICE MENU
+
+When `-DeviceMenu` is enabled (via CLI switch or `"DeviceMenu": true` in config.json),
+the script presents an interactive OS type selection menu after loading the device list:
+
+```
+  Select OS types to process:
+
+  #  OS Type              Devices
+  -  -------------------  -------
+  1  cisco-iosxe                4
+  2  cisco-wlc-aireos           2
+  A  All                        6
+
+  Selection (e.g. 1,2 or A):
+```
+
+- Enter a single number (e.g. `1`) to process only that OS type
+- Enter multiple numbers separated by commas (e.g. `1,2`) to process several types
+- Enter `A` or press Enter to process all devices
+- Invalid input is rejected and the prompt is repeated
+
+After selection, only devices matching the chosen OS types are processed. The banner,
+command file loading, and all output reflect the filtered set. This is useful when a single
+`devices.txt` contains devices across multiple platforms and you want to target a specific
+subset without editing the file.
 
 ## PARALLEL EXECUTION
 
@@ -680,3 +716,7 @@ Parallel execution with a wider hostname column for long device names:
 Update config.json with any new parameters added in recent script updates:
 
     .\ssh-cmd-runner.ps1 -UpdateConfig
+
+Interactively select which OS types to process from the device list:
+
+    .\ssh-cmd-runner.ps1 -DeviceMenu
