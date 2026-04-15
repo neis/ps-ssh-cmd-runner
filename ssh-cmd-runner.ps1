@@ -2056,6 +2056,76 @@ function Write-DeviceResult {
     }
 }
 
+# Pre-build lookup maps for per-device output (used by Write-DeviceOutputFiles)
+$deviceOSMap       = @{}
+$deviceCategoryMap = @{}
+foreach ($d in $devices) {
+    $deviceOSMap[$d.IP]       = $d.OS
+    $deviceCategoryMap[$d.IP] = $d.Category
+}
+
+# Helper: write per-device JSON and Netcortex files immediately after a device completes.
+# Called from both sequential and parallel result handlers so output is durable.
+function Write-DeviceOutputFiles {
+    param([PSCustomObject]$Result)
+    if ($Result.Status -ne "Success") { return }
+
+    $safeDevice = ConvertTo-SafeFileName $Result.DeviceName
+    $safeIP     = ConvertTo-SafeFileName $Result.IPAddress
+
+    # Per-device JSON
+    if ($JsonEnabled) {
+        $devicePath = Join-Path $JsonDirectory "${safeDevice}_${safeIP}_${timestamp}.json"
+        $deviceDoc = [ordered]@{
+            name      = $Result.DeviceName
+            ip        = $Result.IPAddress
+            category  = $deviceCategoryMap[$Result.IPAddress]
+            timestamp = $Result.Timestamp
+            commands  = @(
+                $Result.CommandResults | ForEach-Object {
+                    [ordered]@{
+                        command    = $_.command
+                        raw_output = @($_.raw_output)
+                    }
+                }
+            )
+        }
+        $deviceDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $devicePath -Encoding UTF8
+    }
+
+    # Per-device Netcortex
+    if ($NetcortexEnabled) {
+        $netcortexFile = Join-Path $NetcortexDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
+        $deviceOS = $deviceOSMap[$Result.IPAddress]
+        $ncCmds = if ($deviceOS -and $netcortexCommandsByOS.ContainsKey($deviceOS)) {
+            $netcortexCommandsByOS[$deviceOS]
+        } else { $null }
+
+        if ($ncCmds) {
+            $crLookup = @{}
+            foreach ($cr in $Result.CommandResults) { $crLookup[$cr.command.ToLower()] = $cr }
+            $orderedResults = foreach ($cmd in $ncCmds) {
+                $key = $cmd.ToLower()
+                if ($crLookup.ContainsKey($key)) { $crLookup[$key] }
+            }
+        }
+        else {
+            $orderedResults = $Result.CommandResults
+        }
+
+        $netcortexLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($cr in $orderedResults) {
+            $netcortexLines.Add("$($cr.prompt)$($cr.command)")
+            $outLines = @($cr.raw_output)
+            $trimIdx = $outLines.Count - 1
+            while ($trimIdx -ge 0 -and [string]::IsNullOrEmpty($outLines[$trimIdx])) { $trimIdx-- }
+            for ($i = 0; $i -le $trimIdx; $i++) { $netcortexLines.Add($outLines[$i]) }
+            $netcortexLines.Add($cr.prompt)
+        }
+        Set-Content -Path $netcortexFile -Value ($netcortexLines -join "`r`n") -Encoding UTF8
+    }
+}
+
 if ($MaxParallelJobs -le 1) {
     # -----------------------------------------------------------------
     # SEQUENTIAL MODE — table output, devices processed one at a time
@@ -2126,6 +2196,7 @@ if ($MaxParallelJobs -le 1) {
             -AuthRetryCount ([ref]$authRetryCount) -MaxAuthRetries $maxAuthRetries `
             -CredentialsSaved ([ref]$credentialsSaved) -CredLabel $CredentialLabel `
             -User $username -Pass $password
+        Write-DeviceOutputFiles -Result $sessionResult
 
         if ($sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
             $results.Add($sessionResult)
@@ -2411,6 +2482,7 @@ else {
                 }
 
                 $results.Add($sessionResult)
+                    Write-DeviceOutputFiles -Result $sessionResult
 
                 if ($sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
                     $authAbort = $true
@@ -2484,125 +2556,41 @@ $successResults = @($results | Where-Object { $_.Status -eq "Success" })
 $failedIPs = @($results | Where-Object { $_.Status -eq "Failed" } | ForEach-Object { $_.IPAddress })
 
 # ---------------------------------------------
-# NETCORTEX OUTPUT
+# JSON SESSION SUMMARY (per-device files already written during processing)
 # ---------------------------------------------
-if ($NetcortexEnabled) {
-    # Map each device IP to its OS type for Netcortex command list lookup
-    $deviceOSMap = @{}
-    foreach ($d in $devices) { $deviceOSMap[$d.IP] = $d.OS }
-
-    foreach ($r in $successResults) {
-        $safeDevice = ConvertTo-SafeFileName $r.DeviceName
-        $safeIP = ConvertTo-SafeFileName $r.IPAddress
-        $netcortexFile = Join-Path $NetcortexDirectory "${safeDevice}_${safeIP}_${timestamp}.txt"
-
-        # Determine whether this OS has a dedicated Netcortex command list.
-        # If so, filter and reorder results to match the Netcortex file's ordering.
-        # If not, fall back to all commands in execution order (original behavior).
-        $deviceOS = $deviceOSMap[$r.IPAddress]
-        $ncCmds = if ($deviceOS -and $netcortexCommandsByOS.ContainsKey($deviceOS)) {
-            $netcortexCommandsByOS[$deviceOS]
+if ($JsonEnabled -and $JsonSessionFileEnabled) {
+    $sessionDoc = [ordered]@{
+        platform           = $osPlatform
+        engine             = $psEngine
+        date               = $runDate
+        result             = [ordered]@{
+            total   = $results.Count
+            success = $successResults.Count
+            failed  = $failedIPs.Count
         }
-        else { $null }
-
-        if ($ncCmds) {
-            # Build case-insensitive lookup from command string -> CommandResult
-            $crLookup = @{}
-            foreach ($cr in $r.CommandResults) {
-                $crLookup[$cr.command.ToLower()] = $cr
-            }
-            # Select results in Netcortex file order, including only listed commands
-            $orderedResults = foreach ($cmd in $ncCmds) {
-                $key = $cmd.ToLower()
-                if ($crLookup.ContainsKey($key)) { $crLookup[$key] }
-            }
+        devices            = [ordered]@{
+            count               = $results.Count
+            ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
+            failed_ip_addresses = @($failedIPs)
         }
-        else {
-            $orderedResults = $r.CommandResults
-        }
-
-        # Build netcortex content: prompt+command echo, raw output, bare prompt separator.
-        # Trailing blank lines are stripped from each command's output so the bare
-        # prompt lands immediately after the last non-empty output line — giving the
-        # downstream ingest a clean prompt-delimited structure with no ambiguous blanks.
-        $netcortexLines = [System.Collections.Generic.List[string]]::new()
-        foreach ($cr in $orderedResults) {
-            $netcortexLines.Add("$($cr.prompt)$($cr.command)")
-            $outLines = @($cr.raw_output)
-            $trimIdx = $outLines.Count - 1
-            while ($trimIdx -ge 0 -and [string]::IsNullOrEmpty($outLines[$trimIdx])) { $trimIdx-- }
-            for ($i = 0; $i -le $trimIdx; $i++) { $netcortexLines.Add($outLines[$i]) }
-            $netcortexLines.Add($cr.prompt)
-        }
-        Set-Content -Path $netcortexFile -Value ($netcortexLines -join "`r`n") -Encoding UTF8
+        commands_directory = $CommandsDirectory
+        categories         = [ordered]@{}
+        os_types           = [ordered]@{}
     }
-}
-
-# ---------------------------------------------
-# JSON OUTPUT
-# ---------------------------------------------
-if ($JsonEnabled) {
-    # --- Session summary file (optional) ---
-    if ($JsonSessionFileEnabled) {
-        $sessionDoc = [ordered]@{
-            platform           = $osPlatform
-            engine             = $psEngine
-            date               = $runDate
-            result             = [ordered]@{
-                total   = $results.Count
-                success = $successResults.Count
-                failed  = $failedIPs.Count
-            }
-            devices            = [ordered]@{
-                count               = $results.Count
-                ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
-                failed_ip_addresses = @($failedIPs)
-            }
-            commands_directory = $CommandsDirectory
-            categories         = [ordered]@{}
-            os_types           = [ordered]@{}
+    if ($uniqueCategories.Count -gt 0) {
+        foreach ($catKey in $uniqueCategories) {
+            $sessionDoc.categories[$catKey] = @($devices | Where-Object { $_.Category -eq $catKey }).Count
         }
-        if ($uniqueCategories.Count -gt 0) {
-            foreach ($catKey in $uniqueCategories) {
-                $sessionDoc.categories[$catKey] = @($devices | Where-Object { $_.Category -eq $catKey }).Count
-            }
-        }
-        foreach ($osKey in $uniqueOSTypes) {
-            $sessionDoc.os_types[$osKey] = [ordered]@{
-                device_count  = @($devices | Where-Object { $_.OS -eq $osKey }).Count
-                command_count = $commandsByOS[$osKey].Count
-                commands      = @($commandsByOS[$osKey])
-            }
-        }
-        $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
-        $sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
     }
-
-    # --- Per-device JSON files (successful connections only) ---
-    $deviceCategoryMap = @{}
-    foreach ($d in $devices) { $deviceCategoryMap[$d.IP] = $d.Category }
-
-    foreach ($r in $successResults) {
-        $safeDevice = ConvertTo-SafeFileName $r.DeviceName
-        $safeIP = ConvertTo-SafeFileName $r.IPAddress
-        $devicePath = Join-Path $JsonDirectory "${safeDevice}_${safeIP}_${timestamp}.json"
-
-        $deviceDoc = [ordered]@{
-            name      = $r.DeviceName
-            ip        = $r.IPAddress
-            category  = $deviceCategoryMap[$r.IPAddress]
-            timestamp = $r.Timestamp
-            commands  = @(
-                $r.CommandResults | ForEach-Object {
-                    [ordered]@{
-                        command    = $_.command
-                        raw_output = @($_.raw_output)
-                    }
-                }
-            )
+    foreach ($osKey in $uniqueOSTypes) {
+        $sessionDoc.os_types[$osKey] = [ordered]@{
+            device_count  = @($devices | Where-Object { $_.OS -eq $osKey }).Count
+            command_count = $commandsByOS[$osKey].Count
+            commands      = @($commandsByOS[$osKey])
         }
-        $deviceDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $devicePath -Encoding UTF8
     }
+    $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
+    $sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
 }
 
 # ---------------------------------------------
