@@ -38,17 +38,19 @@ subsequent runs do not re-prompt as long as the stored credentials remain valid.
 1. Create a `devices.txt` CSV file:
 
    ```csv
-   IP,OS
-   10.1.1.1,cisco-iosxe
-   10.1.1.2,cisco-nxos
-   10.1.1.3,cisco-wlc-aireos
+   IP,Category,OS
+   10.1.1.1,Switch,cisco-switch-iosxe
+   10.1.1.2,Router,cisco-router-iosxe
+   10.1.1.3,WLC,cisco-wlc-aireos
    ```
+
+   The `Category` column is optional (for backward compatibility, `IP,OS` still works).
 
 2. Create a `commands/` directory with per-OS command files:
 
    ```
-   commands/cisco-iosxe.txt
-   commands/cisco-nxos.txt
+   commands/cisco-switch-iosxe.txt
+   commands/cisco-router-iosxe.txt
    commands/cisco-wlc-aireos.txt
    ```
 
@@ -63,13 +65,14 @@ See the `Examples/` directory for sample files.
 
 Each OS type defines automatic behaviors for paging, PTY allocation, and session teardown.
 
-| OS Type            | Platform                           | Paging Command          | PTY    | Exit Sequence     |
-| ------------------ | ---------------------------------- | ----------------------- | ------ | ----------------- |
-| `cisco-iosxe`      | Cisco IOS / IOS-XE (Catalyst, ISR) | `terminal length 0`     | Auto   | `exit`            |
-| `cisco-iosxr`      | Cisco IOS-XR (ASR9000, NCS, CRS)   | `terminal length 0`     | Auto   | `exit`            |
-| `cisco-nxos`       | Cisco NX-OS (Nexus 5K/7K/9K)       | `terminal length 0`     | Always | `exit`            |
-| `cisco-wlc-aireos` | Cisco WLC AireOS (5520, etc.)      | `config paging disable` | Always | `logout` then `n` |
-| `cisco-wlc-iosxe`  | Cisco WLC IOS-XE (Catalyst 9800)   | `terminal length 0`     | Auto   | `exit`            |
+| OS Type              | Platform                              | Paging Command          | PTY    | Exit Sequence     |
+| -------------------- | ------------------------------------- | ----------------------- | ------ | ----------------- |
+| `cisco-switch-iosxe` | Cisco IOS-XE Switches (Catalyst)      | `terminal length 0`     | Auto   | `exit`            |
+| `cisco-router-iosxe` | Cisco IOS-XE Routers (ISR, ASR1K)     | `terminal length 0`     | Auto   | `exit`            |
+| `cisco-router-iosxr` | Cisco IOS-XR Routers (ASR9K, NCS)     | `terminal length 0`     | Auto   | `exit`            |
+| `cisco-switch-nxos`  | Cisco NX-OS Switches (Nexus 5K/7K/9K) | `terminal length 0`     | Always | `exit`            |
+| `cisco-wlc-aireos`   | Cisco WLC AireOS (5520, etc.)         | `config paging disable` | Always | `logout` then `n` |
+| `cisco-wlc-iosxe`    | Cisco WLC IOS-XE (Catalyst 9800)      | `terminal length 0`     | Auto   | `exit`            |
 
 **Paging Command** is sent silently after login and does not appear in log output.
 
@@ -120,14 +123,17 @@ Copy `[example] config.json` from the `Examples/` directory to `config.json` and
 
 ### DeviceListFile `[string]`
 
-Path to a CSV file with `IP,OS` columns (header row required). Each row specifies a device
-IP and its operating system type. See [Supported OS Types](#supported-os-types) for valid
-values. Blank rows and rows where the IP starts with `#` are ignored. Default: `.\devices.txt`
+Path to a CSV file with `IP,Category,OS` columns (header row required). Each row specifies
+a device IP, an optional free-text category (e.g. "Switch", "Router", "WLC"), and its OS
+type. See [Supported OS Types](#supported-os-types) for valid OS values. The `Category`
+column is optional for backward compatibility — files with only `IP,OS` columns are still
+accepted (Category defaults to empty). Blank rows and rows where the IP starts with `#`
+are ignored. Default: `.\devices.txt`
 
 ### CommandsDirectory `[string]`
 
 Directory containing per-OS command files. Each file must be named `<os-type>.txt`
-(e.g. `cisco-iosxe.txt`, `cisco-nxos.txt`) matching the OS column in the device CSV.
+(e.g. `cisco-switch-iosxe.txt`, `cisco-router-iosxe.txt`) matching the OS column in the device CSV.
 Only files for OS types present in the device list are required. Default: `.\commands`
 
 ### LogDirectory `[string]`
@@ -285,29 +291,53 @@ The menu only appears when the device list contains more than one OS type. Defau
 ## DEVICE MENU
 
 When `-DeviceMenu` is enabled (via CLI switch or `"DeviceMenu": true` in config.json),
-the script presents an interactive OS type selection menu after loading the device list:
+the script presents a two-step interactive selection menu after loading the device list.
+Each step only appears when there are multiple options to choose from.
+
+### Step 1: Category Selection
+
+If the device list contains multiple categories, the category menu is shown first:
 
 ```
-  Select OS types to process:
+  Step 1 of 2: Select device categories to process:
 
-  #  OS Type              Devices
-  -  -------------------  -------
-  1  cisco-iosxe                4
-  2  cisco-wlc-aireos           2
-  A  All                        6
+  #  Category  Devices
+  -  --------  -------
+  1  Switch          4
+  2  WLC             2
+  A  All             6
 
   Selection (e.g. 1,2 or A):
 ```
 
-- Enter a single number (e.g. `1`) to process only that OS type
-- Enter multiple numbers separated by commas (e.g. `1,2`) to process several types
-- Enter `A` or press Enter to process all devices
-- Invalid input is rejected and the prompt is repeated
+### Step 2: OS Type Selection
 
-After selection, only devices matching the chosen OS types are processed. The banner,
+After category filtering (or immediately if only one category exists), the OS type menu
+is shown when multiple OS types remain:
+
+```
+  Step 2 of 2: Select OS types to process:
+
+  #  OS Type               Devices
+  -  --------------------  -------
+  1  cisco-switch-iosxe          4
+  A  All                         4
+
+  Selection (e.g. 1,2 or A):
+```
+
+### Selection Rules
+
+- Enter a single number (e.g. `1`) to select one option
+- Enter multiple numbers separated by commas (e.g. `1,2`) to select several
+- Enter `A` or press Enter to select all
+- Invalid input is rejected and the prompt is repeated
+- Steps are skipped when only one option exists (no point showing a single-choice menu)
+- Step labels ("Step 1 of 2") appear only when both steps are shown
+
+After selection, only devices matching the chosen criteria are processed. The banner,
 command file loading, and all output reflect the filtered set. This is useful when a single
-`devices.txt` contains devices across multiple platforms and you want to target a specific
-subset without editing the file.
+`devices.txt` contains devices across multiple categories and platforms.
 
 ## PARALLEL EXECUTION
 
@@ -322,13 +352,13 @@ displays a table that grows as devices are dispatched, with status columns updat
 as each device completes:
 
 ```
-   # | IP              | OS               | Status    |   Time | Hostname         | Reason
------+-----------------+------------------+-----------+--------+------------------+--------
- 1/5 | 10.1.50.1       | cisco-iosxe      | Success   |  20.15 | s4500x-1         |
- 2/5 | 10.1.50.2       | cisco-iosxe      | Success   |  22.03 | s3850x-1         |
- 3/5 | 10.1.50.3       | cisco-iosxe      |           |        |                  |
- 4/5 | 10.1.50.4       | cisco-nxos       | Failed    |   0.00 |                  | Connection timed out
- 5/5 | 10.1.50.5       | cisco-iosxe      | Skipped   |   0.00 |                  | No ping response
+   # | Category | IP              | OS                 | Status    |   Time | Hostname         | Reason
+-----+----------+-----------------+--------------------+-----------+--------+------------------+--------
+ 1/5 | Switch   | 10.1.50.1       | cisco-switch-iosxe | Success   |  20.15 | s4500x-1         |
+ 2/5 | Switch   | 10.1.50.2       | cisco-switch-iosxe | Success   |  22.03 | s3850x-1         |
+ 3/5 | Router   | 10.1.50.3       | cisco-router-iosxe |           |        |                  |
+ 4/5 | Switch   | 10.1.50.4       | cisco-switch-nxos  | Failed    |   0.00 |                  | Connection timed out
+ 5/5 | WLC      | 10.1.50.5       | cisco-wlc-aireos   | Skipped   |   0.00 |                  | No ping response
 ```
 
 In sequential mode (`MaxParallelJobs = 1`), the original inline output format is used
@@ -367,8 +397,10 @@ CSV are required.
 
 ```
 commands/
-  cisco-iosxe.txt
-  cisco-nxos.txt
+  cisco-switch-iosxe.txt
+  cisco-router-iosxe.txt
+  cisco-router-iosxr.txt
+  cisco-switch-nxos.txt
   cisco-wlc-aireos.txt
   cisco-wlc-iosxe.txt
 ```
@@ -377,10 +409,10 @@ Each file contains one command per line. Blank lines and lines starting with `#`
 **Do not include paging-disable commands** (e.g. `terminal length 0`) in these files -- the
 script sends the appropriate paging command automatically based on the OS type.
 
-Example `commands/cisco-iosxe.txt`:
+Example `commands/cisco-switch-iosxe.txt`:
 
 ```
-# Cisco IOS / IOS-XE discovery commands
+# Cisco IOS-XE Switch discovery commands
 show startup-config | include hostname
 show version
 show inventory
@@ -410,11 +442,11 @@ and in what order.
 
 ```
 commands/
-  cisco-iosxe.txt              ← standard commands (log, JSON, all outputs)
-  cisco-nxos.txt
+  cisco-switch-iosxe.txt         ← standard commands (log, JSON, all outputs)
+  cisco-switch-nxos.txt
   netcortex/
-    cisco-iosxe.txt            ← Netcortex-specific list (subset + ordering)
-    cisco-nxos.txt
+    cisco-switch-iosxe.txt       ← Netcortex-specific list (subset + ordering)
+    cisco-switch-nxos.txt
 ```
 
 **How merging works:** Commands from the Netcortex file that are not already in the standard

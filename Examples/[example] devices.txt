@@ -1,4 +1,7 @@
-IP,OS
-192.168.1.1,cisco-iosxe
-192.168.1.2,cisco-nxos
-192.168.1.3,cisco-wlc-aireos
+IP,Category,OS
+192.168.1.1,Switch,cisco-switch-iosxe
+192.168.1.2,Router,cisco-router-iosxe
+192.168.1.3,Switch,cisco-switch-nxos
+192.168.1.4,WLC,cisco-wlc-aireos
+192.168.1.5,WLC,cisco-wlc-iosxe
+192.168.1.6,Router,cisco-router-iosxr

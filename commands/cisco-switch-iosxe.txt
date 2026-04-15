@@ -1,0 +1,20 @@
+# Cisco IOS-XE Switch commands (paging disabled automatically via "terminal length 0")
+show version
+show inventory
+show interface
+show interface status
+show cdp neighbors detail
+show lldp neighbors detail
+show ip route vrf all
+show power inline
+show mac address-table
+show ip arp vrf all
+show etherchannel summary
+show interface transceiver
+show ip ospf neighbor
+show ip ospf interface brief
+show ip eigrp neighbors
+show ip eigrp topology
+show ip bgp summary
+show ip bgp neighbors
+show ip protocols

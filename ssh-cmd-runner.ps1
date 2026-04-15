@@ -16,7 +16,7 @@
 
 .PARAMETER CommandsDirectory
     Directory containing per-OS command files. Each file must be named
-    <os-type>.txt (e.g. cisco-iosxe.txt, cisco-nxos.txt) matching the OS
+    <os-type>.txt (e.g. cisco-switch-iosxe.txt, cisco-switch-nxos.txt) matching the OS
     column in the device CSV. Default is .\commands.
 
 .PARAMETER LogDirectory
@@ -281,6 +281,64 @@ function Write-C {
     }
 }
 
+# Helper: display a numbered multi-select menu and return selected values.
+# Returns [string[]] of selected option values, or $null if user chose "All".
+function Show-SelectionMenu {
+    param(
+        [string]$Title,
+        [string]$ColumnHeader,
+        [string[]]$Options,
+        [PSCustomObject[]]$Devices,
+        [string]$PropertyName
+    )
+    $maxColLen = [Math]::Max($ColumnHeader.Length, ($Options | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum)
+    $nw = "$($Options.Count)".Length
+    $totalCount = $Devices.Count
+
+    Write-Host ""
+    Write-C "  $Title" -Color Cyan
+    Write-Host ""
+    $hdrN = "#".PadLeft($nw)
+    $hdrC = $ColumnHeader.PadRight($maxColLen)
+    Write-C "  $hdrN  $hdrC  Devices" -Color DarkGray
+    Write-C "  $('-' * $nw)  $('-' * $maxColLen)  -------" -Color DarkGray
+    for ($i = 0; $i -lt $Options.Count; $i++) {
+        $val   = $Options[$i]
+        $count = @($Devices | Where-Object { $_.$PropertyName -eq $val }).Count
+        $num   = "$($i + 1)".PadLeft($nw)
+        $padV  = $val.PadRight($maxColLen)
+        Write-C "  $num  $padV  $("$count".PadLeft(7))" -Color Gray
+    }
+    $allN = "A".PadLeft($nw)
+    $allV = "All".PadRight($maxColLen)
+    Write-C "  $allN  $allV  $("$totalCount".PadLeft(7))" -Color Gray
+    Write-Host ""
+
+    while ($true) {
+        $response = (Read-Host "  Selection (e.g. 1,2 or A)").Trim()
+        if ($response -eq '' -or $response.ToUpper() -eq 'A') {
+            return $null   # all selected
+        }
+
+        $nums = $response -split ',' | ForEach-Object { $_.Trim() }
+        $valid = $true
+        $selected = @()
+        foreach ($n in $nums) {
+            $idx = 0
+            if ([int]::TryParse($n, [ref]$idx) -and $idx -ge 1 -and $idx -le $Options.Count) {
+                $selected += $Options[$idx - 1]
+            }
+            else {
+                Write-C "  Invalid selection: '$n'. Enter numbers 1-$($Options.Count) or A for all." -Color Orange
+                $valid = $false
+                break
+            }
+        }
+        if (-not $valid) { continue }
+        return @($selected | Sort-Object -Unique)
+    }
+}
+
 if (Test-Path $configPath -PathType Leaf) {
     try {
         $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -435,11 +493,12 @@ $thinSep = ("-" * 40)
 # SendInitialNewline  : send an empty line after SSH session starts to trigger the CLI prompt
 #                       (some devices wait for a keystroke before displaying the prompt)
 $validOSTypes = @{
-    'cisco-iosxe'      = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
-    'cisco-iosxr'      = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
-    'cisco-nxos'       = @{ PagingCommand = 'terminal length 0'; RequirePTY = $true; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
-    'cisco-wlc-aireos' = @{ PagingCommand = 'config paging disable'; RequirePTY = $true; ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$'; SendInitialNewline = $true }
-    'cisco-wlc-iosxe'  = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-switch-iosxe'  = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-router-iosxe'  = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-router-iosxr'  = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-switch-nxos'   = @{ PagingCommand = 'terminal length 0'; RequirePTY = $true; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
+    'cisco-wlc-aireos'    = @{ PagingCommand = 'config paging disable'; RequirePTY = $true; ExitCommands = @('logout', 'n'); InteractivePattern = '\(y/n\)\s*$'; SendInitialNewline = $true }
+    'cisco-wlc-iosxe'     = @{ PagingCommand = 'terminal length 0'; RequirePTY = $false; ExitCommands = @('exit'); InteractivePattern = ''; SendInitialNewline = $false }
 }
 
 # Validate input files exist (skip when only compressing)
@@ -492,24 +551,26 @@ if (-not $CompressOnly) {
         exit 1
     }
 
-    # Validate required columns
+    # Validate required columns (Category is optional for backward compatibility)
     $csvColumns = $devicesCsv[0].PSObject.Properties.Name
     if ('IP' -notin $csvColumns -or 'OS' -notin $csvColumns) {
-        Write-Error "Device CSV must have 'IP' and 'OS' columns. Found: $($csvColumns -join ', ')"
+        Write-Error "Device CSV must have 'IP' and 'OS' columns (Category is optional). Found: $($csvColumns -join ', ')"
         exit 1
     }
+    $hasCategory = 'Category' -in $csvColumns
 
     # Validate OS values and filter blanks/comments
     $devices = @()
     $lineNum = 1   # header is line 1; data starts at line 2
     foreach ($row in $devicesCsv) {
         $lineNum++
-        $ip = if ($row.IP) { $row.IP.Trim() } else { "" }
-        $os = if ($row.OS) { $row.OS.Trim().ToLower() } else { "" }
+        $ip       = if ($row.IP) { $row.IP.Trim() } else { "" }
+        $os       = if ($row.OS) { $row.OS.Trim().ToLower() } else { "" }
+        $category = if ($hasCategory -and $row.Category) { $row.Category.Trim() } else { "" }
         if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
         if ([string]::IsNullOrWhiteSpace($os)) {
             Write-C "ERROR: Device '$ip' on line $lineNum of '$DeviceListFile' is missing the OS field." -Color Red
-            Write-C "  Each row must have the format: IP,OS  (e.g. 10.1.1.1,cisco-iosxe)" -Color Red
+            Write-C "  Each row must have the format: IP,Category,OS  (e.g. 10.1.1.1,Switch,cisco-switch-iosxe)" -Color Red
             exit 1
         }
         if ($os -notin $validOSTypes.Keys) {
@@ -517,7 +578,7 @@ if (-not $CompressOnly) {
             Write-C "  Valid OS types: $($validOSTypes.Keys -join ', ')" -Color Red
             exit 1
         }
-        $devices += [PSCustomObject]@{ IP = $ip; OS = $os }
+        $devices += [PSCustomObject]@{ IP = $ip; Category = $category; OS = $os }
     }
 
     if ($devices.Count -eq 0) {
@@ -531,76 +592,69 @@ if (-not $CompressOnly) {
         exit 1
     }
 
-    # Discover unique OS types from the device list
-    $uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
+    # Discover unique OS types and categories from the device list
+    $uniqueOSTypes    = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
+    $uniqueCategories = @($devices | ForEach-Object { $_.Category } | Where-Object { $_ -ne "" } | Sort-Object -Unique)
 
-    # Interactive OS type selection menu
-    if ($DeviceMenu -and $uniqueOSTypes.Count -gt 1) {
+    # Interactive two-step device menu (Category → OS type)
+    if ($DeviceMenu) {
+        $showCatMenu = $uniqueCategories.Count -gt 1
+        $showOSMenu  = $uniqueOSTypes.Count -gt 1
+        $totalSteps  = ([int]$showCatMenu) + ([int]$showOSMenu)
+        $stepNum     = 0
         $totalDeviceCount = $devices.Count
-        $maxOSLen = [Math]::Max(7, ($uniqueOSTypes | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum)
-        $numWidth = "$($uniqueOSTypes.Count)".Length
 
-        Write-Host ""
-        Write-C "  Select OS types to process:" -Color Cyan
-        Write-Host ""
-        $hdrNum   = "#".PadLeft($numWidth)
-        $hdrOS    = "OS Type".PadRight($maxOSLen)
-        Write-C "  $hdrNum  $hdrOS  Devices" -Color DarkGray
-        Write-C "  $('-' * $numWidth)  $('-' * $maxOSLen)  -------" -Color DarkGray
-        for ($i = 0; $i -lt $uniqueOSTypes.Count; $i++) {
-            $osName = $uniqueOSTypes[$i]
-            $count  = @($devices | Where-Object { $_.OS -eq $osName }).Count
-            $num    = "$($i + 1)".PadLeft($numWidth)
-            $padOS  = $osName.PadRight($maxOSLen)
-            Write-C "  $num  $padOS  $("$count".PadLeft(7))" -Color Gray
+        # Step 1: Category selection
+        if ($showCatMenu) {
+            $stepNum++
+            $stepLabel = if ($totalSteps -gt 1) { "Step $stepNum of ${totalSteps}: " } else { "" }
+            $selected = Show-SelectionMenu `
+                -Title "${stepLabel}Select device categories to process:" `
+                -ColumnHeader "Category" `
+                -Options $uniqueCategories `
+                -Devices $devices `
+                -PropertyName "Category"
+
+            if ($null -ne $selected) {
+                $devices = @($devices | Where-Object { $_.Category -in $selected })
+                $uniqueOSTypes = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
+                $uniqueCategories = @($selected | Sort-Object)
+                # Re-evaluate whether OS menu is needed after category filtering
+                $showOSMenu = $uniqueOSTypes.Count -gt 1
+            }
         }
-        $allPad = "A".PadLeft($numWidth)
-        $allOS  = "All".PadRight($maxOSLen)
-        Write-C "  $allPad  $allOS  $("$totalDeviceCount".PadLeft(7))" -Color Gray
-        Write-Host ""
 
-        # Read and validate selection with retry loop
-        while ($true) {
-            $input = (Read-Host "  Selection (e.g. 1,2 or A)").Trim()
-            if ($input -eq '' -or $input.ToUpper() -eq 'A') {
-                break   # process all OS types
+        # Step 2: OS type selection (from devices matching selected categories)
+        if ($showOSMenu) {
+            $stepNum++
+            $stepLabel = if ($totalSteps -gt 1) { "Step $stepNum of ${totalSteps}: " } else { "" }
+            $selected = Show-SelectionMenu `
+                -Title "${stepLabel}Select OS types to process:" `
+                -ColumnHeader "OS Type" `
+                -Options $uniqueOSTypes `
+                -Devices $devices `
+                -PropertyName "OS"
+
+            if ($null -ne $selected) {
+                $devices = @($devices | Where-Object { $_.OS -in $selected })
+                $uniqueOSTypes = @($selected | Sort-Object)
             }
+        }
 
-            $nums = $input -split ',' | ForEach-Object { $_.Trim() }
-            $valid = $true
-            $selectedTypes = @()
-            foreach ($n in $nums) {
-                $idx = 0
-                if ([int]::TryParse($n, [ref]$idx) -and $idx -ge 1 -and $idx -le $uniqueOSTypes.Count) {
-                    $selectedTypes += $uniqueOSTypes[$idx - 1]
-                }
-                else {
-                    Write-C "  Invalid selection: '$n'. Enter numbers 1-$($uniqueOSTypes.Count) or A for all." -Color Orange
-                    $valid = $false
-                    break
-                }
-            }
-            if (-not $valid) { continue }
-
-            # Filter devices to selected OS types
-            $selectedTypes = @($selectedTypes | Sort-Object -Unique)
-            $devices = @($devices | Where-Object { $_.OS -in $selectedTypes })
-            $uniqueOSTypes = @($selectedTypes | Sort-Object)
-
+        # Summary after selections
+        if ($showCatMenu -or $showOSMenu) {
             if ($devices.Count -eq 0) {
-                Write-C "  No devices match the selected OS types. Exiting." -Color Red
+                Write-C "  No devices match the selected criteria. Exiting." -Color Red
                 exit 0
             }
-
             $skipped = $totalDeviceCount - $devices.Count
             Write-Host ""
             Write-C "  Selected $($devices.Count) device(s) across $($uniqueOSTypes.Count) OS type(s)." -Color Cyan
             if ($skipped -gt 0) {
-                Write-C "  Skipped $skipped device(s) from unselected OS types." -Color DarkGray
+                Write-C "  Skipped $skipped device(s) from unselected categories/OS types." -Color DarkGray
             }
-            break
+            Write-Host ""
         }
-        Write-Host ""
     }
 
     # Load per-OS command files for each OS type referenced in the (possibly filtered) device list
@@ -1795,6 +1849,14 @@ $devCountStr = "$($devices.Count)".PadRight(37)
 $osBreakdownLines = @($uniqueOSTypes | ForEach-Object {
         $osName = $_; "$osName($(@($devices | Where-Object { $_.OS -eq $osName }).Count))"
     })
+$catBreakdownLines = @()
+if ($uniqueCategories.Count -gt 0) {
+    $catBreakdownLines = @($uniqueCategories | ForEach-Object {
+            $catVal  = $_
+            $catName = if ($catVal -eq "") { "(Uncategorized)" } else { $catVal }
+            "$catName($(@($devices | Where-Object { $_.Category -eq $catVal }).Count))"
+        })
+}
 $cmdDirStr = $CommandsDirectory
 if ($cmdDirStr.Length -gt 37) { $cmdDirStr = $cmdDirStr.Substring(0, 34) + "..." }
 $cmdDirStr = $cmdDirStr.PadRight(37)
@@ -1835,12 +1897,21 @@ Write-C "+==================================================+" -Color Gray
 Write-C "|       SSH Network Command Runner - Starting      |" -Color Gray
 Write-C "+==================================================+" -Color Gray
 Write-C "|  Devices  : ${devCountStr}|" -Color Gray
+if ($catBreakdownLines.Count -gt 0) {
+    for ($i = 0; $i -lt $catBreakdownLines.Count; $i++) {
+        $label = if ($i -eq 0) { "|  Category: " } else { "|            " }
+        $value = $catBreakdownLines[$i]
+        if ($value.Length -gt 37) { $value = $value.Substring(0, 34) + "..." }
+        $value = $value.PadRight(37)
+        Write-C "${label}${value} |" -Color Gray
+    }
+}
 for ($i = 0; $i -lt $osBreakdownLines.Count; $i++) {
-    $label = if ($i -eq 0) { "|  OS Types : " } else { "|             " }
+    $label = if ($i -eq 0) { "|  OS Types: " } else { "|            " }
     $value = $osBreakdownLines[$i]
     if ($value.Length -gt 37) { $value = $value.Substring(0, 34) + "..." }
     $value = $value.PadRight(37)
-    Write-C "${label}${value}|" -Color Gray
+    Write-C "${label}${value} |" -Color Gray
 }
 Write-C "|  Cmd Dir  : ${cmdDirStr}|" -Color Gray
 Write-C "|  Timeout  : ${timeoutStr}|" -Color Gray
@@ -1871,38 +1942,54 @@ $maxAuthRetries = 3
 
 # Pre-compute table column widths (shared by sequential and parallel modes)
 $numWidth = "$($devices.Count)".Length
-$maxIPLen = [Math]::Max(2, ($devices | ForEach-Object { $_.IP.Length } | Measure-Object -Maximum).Maximum)
-$maxOSLen = [Math]::Max(2, ($devices | ForEach-Object { $_.OS.Length } | Measure-Object -Maximum).Maximum)
-$numColW  = $numWidth * 2 + 1                          # "N/N" width
-$statusW  = 9                                           # "Cancelled" = widest
-$timeW    = 6                                           # "999.99"
-$ESC      = $ESC_CHAR
+$maxIPLen  = [Math]::Max(2, ($devices | ForEach-Object { $_.IP.Length } | Measure-Object -Maximum).Maximum)
+$maxCatLen = [Math]::Max(8, ($devices | ForEach-Object { $_.Category.Length } | Measure-Object -Maximum).Maximum)
+$maxOSLen  = [Math]::Max(2, ($devices | ForEach-Object { $_.OS.Length } | Measure-Object -Maximum).Maximum)
+$numColW   = $numWidth * 2 + 1                          # "N/N" width
+$statusW   = 9                                           # "Cancelled" = widest
+$timeW     = 6                                           # "999.99"
+$ESC       = $ESC_CHAR
+$showCategoryCol = ($devices | Where-Object { $_.Category -ne "" } | Select-Object -First 1) -ne $null
 
 # Helper: print the device table header row and separator
 function Write-DeviceTableHeader {
     $hdrNum    = "#".PadLeft($numColW)
+    $hdrCat    = "Category".PadRight($maxCatLen)
     $hdrIP     = "IP".PadRight($maxIPLen)
     $hdrOS     = "OS".PadRight($maxOSLen)
     $hdrStatus = "Status".PadRight($statusW)
     $hdrTime   = "Time".PadLeft($timeW)
     $hdrHost   = "Hostname".PadRight($HostnameColumnWidth)
-    Write-C " $hdrNum | $hdrIP | $hdrOS | $hdrStatus | $hdrTime | $hdrHost | Reason" -Color DarkGray
     $sepNum    = "-" * ($numColW + 1)
+    $sepCat    = "-" * $maxCatLen
     $sepIP     = "-" * $maxIPLen
     $sepOS     = "-" * $maxOSLen
     $sepStatus = "-" * $statusW
     $sepTime   = "-" * $timeW
     $sepHost   = "-" * $HostnameColumnWidth
-    Write-C "$sepNum-+-$sepIP-+-$sepOS-+-$sepStatus-+-$sepTime-+-$sepHost-+--------" -Color DarkGray
+    if ($showCategoryCol) {
+        Write-C " $hdrNum | $hdrCat | $hdrIP | $hdrOS | $hdrStatus | $hdrTime | $hdrHost | Reason" -Color DarkGray
+        Write-C "$sepNum-+-$sepCat-+-$sepIP-+-$sepOS-+-$sepStatus-+-$sepTime-+-$sepHost-+--------" -Color DarkGray
+    }
+    else {
+        Write-C " $hdrNum | $hdrIP | $hdrOS | $hdrStatus | $hdrTime | $hdrHost | Reason" -Color DarkGray
+        Write-C "$sepNum-+-$sepIP-+-$sepOS-+-$sepStatus-+-$sepTime-+-$sepHost-+--------" -Color DarkGray
+    }
 }
 
 # Helper: format and print a device table row prefix (everything before the status columns)
 function Write-DeviceTableRow {
-    param([int]$DeviceNum, [string]$IP, [string]$OS)
+    param([int]$DeviceNum, [string]$IP, [string]$Category, [string]$OS)
     $paddedNum = "$DeviceNum".PadLeft($numWidth)
     $paddedIP  = $IP.PadRight($maxIPLen)
     $paddedOS  = $OS.PadRight($maxOSLen)
-    $prefix    = " $paddedNum/$($devices.Count) | $paddedIP | $paddedOS | "
+    if ($showCategoryCol) {
+        $paddedCat = $Category.PadRight($maxCatLen)
+        $prefix    = " $paddedNum/$($devices.Count) | $paddedCat | $paddedIP | $paddedOS | "
+    }
+    else {
+        $prefix    = " $paddedNum/$($devices.Count) | $paddedIP | $paddedOS | "
+    }
     Write-C $prefix -Color DarkGray -NoNewline
     return $prefix.Length
 }
@@ -1990,7 +2077,7 @@ if ($MaxParallelJobs -le 1) {
         $sendNewline = $osProfile.SendInitialNewline
 
         # Print table row prefix
-        $null = Write-DeviceTableRow -DeviceNum $deviceNum -IP $ip -OS $os
+        $null = Write-DeviceTableRow -DeviceNum $deviceNum -IP $ip -Category $device.Category -OS $os
 
         if ($PingTest) {
             $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
@@ -2105,6 +2192,7 @@ else {
         $deviceQueue.Enqueue([PSCustomObject]@{
                 DeviceNum = $deviceNum
                 IP        = $device.IP
+                Category  = $device.Category
                 OS        = $device.OS
             })
     }
@@ -2191,7 +2279,7 @@ else {
             $sendNewline = $osProfile.SendInitialNewline
 
             # Print the device table row (status columns left blank until completion)
-            $lineStatusCol = Write-DeviceTableRow -DeviceNum $d.DeviceNum -IP $ip -OS $os
+            $lineStatusCol = Write-DeviceTableRow -DeviceNum $d.DeviceNum -IP $ip -Category $d.Category -OS $os
             [Console]::WriteLine("")   # advance to next line (Write-DeviceTableRow uses -NoNewline)
             $totalLines++
             $lineIndex = $totalLines
@@ -2471,7 +2559,13 @@ if ($JsonEnabled) {
                 failed_ip_addresses = @($failedIPs)
             }
             commands_directory = $CommandsDirectory
+            categories         = [ordered]@{}
             os_types           = [ordered]@{}
+        }
+        if ($uniqueCategories.Count -gt 0) {
+            foreach ($catKey in $uniqueCategories) {
+                $sessionDoc.categories[$catKey] = @($devices | Where-Object { $_.Category -eq $catKey }).Count
+            }
         }
         foreach ($osKey in $uniqueOSTypes) {
             $sessionDoc.os_types[$osKey] = [ordered]@{
@@ -2485,6 +2579,9 @@ if ($JsonEnabled) {
     }
 
     # --- Per-device JSON files (successful connections only) ---
+    $deviceCategoryMap = @{}
+    foreach ($d in $devices) { $deviceCategoryMap[$d.IP] = $d.Category }
+
     foreach ($r in $successResults) {
         $safeDevice = ConvertTo-SafeFileName $r.DeviceName
         $safeIP = ConvertTo-SafeFileName $r.IPAddress
@@ -2493,6 +2590,7 @@ if ($JsonEnabled) {
         $deviceDoc = [ordered]@{
             name      = $r.DeviceName
             ip        = $r.IPAddress
+            category  = $deviceCategoryMap[$r.IPAddress]
             timestamp = $r.Timestamp
             commands  = @(
                 $r.CommandResults | ForEach-Object {
