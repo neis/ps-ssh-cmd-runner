@@ -517,19 +517,20 @@ if (-not $CompressOnly) {
     Write-Verbose "Using SSH client: $($sshPath.Source)"
 }
 
-# Create log directory
-if ($LogEnabled -and -not (Test-Path $LogDirectory)) {
-    New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+# Create output directories and resolve to absolute paths.
+# Absolute paths are required because RunspacePool runspaces may have a
+# different working directory than the script, causing relative paths to fail.
+if ($LogEnabled) {
+    if (-not (Test-Path $LogDirectory)) { New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null }
+    $LogDirectory = (Resolve-Path $LogDirectory).Path
 }
-
-# Create JSON output directory
-if ($JsonEnabled -and -not (Test-Path $JsonDirectory)) {
-    New-Item -ItemType Directory -Path $JsonDirectory -Force | Out-Null
+if ($JsonEnabled) {
+    if (-not (Test-Path $JsonDirectory)) { New-Item -ItemType Directory -Path $JsonDirectory -Force | Out-Null }
+    $JsonDirectory = (Resolve-Path $JsonDirectory).Path
 }
-
-# Create netcortex output directory
-if ($NetcortexEnabled -and -not (Test-Path $NetcortexDirectory)) {
-    New-Item -ItemType Directory -Path $NetcortexDirectory -Force | Out-Null
+if ($NetcortexEnabled) {
+    if (-not (Test-Path $NetcortexDirectory)) { New-Item -ItemType Directory -Path $NetcortexDirectory -Force | Out-Null }
+    $NetcortexDirectory = (Resolve-Path $NetcortexDirectory).Path
 }
 
 # Skip device and command loading when only compressing
