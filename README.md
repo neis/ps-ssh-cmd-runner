@@ -115,7 +115,8 @@ Copy `[example] config.json` from the `Examples/` directory to `config.json` and
   "DeleteAfterCompress": false,
   "MaxParallelJobs": 1,
   "HostnameColumnWidth": 16,
-  "DeviceMenu": false
+  "DeviceMenu": false,
+  "AuthAbortEnabled": true
 }
 ```
 
@@ -287,6 +288,14 @@ When enabled, the script displays a numbered list of OS types found in the devic
 along with device counts. Enter one or more numbers (comma-separated) to process only
 those types, or `A` to process all. Devices belonging to unselected OS types are skipped.
 The menu only appears when the device list contains more than one OS type. Default: `$false`
+
+### AuthAbortEnabled `[bool]`
+
+When `$true` (default), the script aborts after 3 consecutive authentication failures,
+cancelling all remaining devices. This protects against wasting time with incorrect
+credentials on a large device list. Set to `$false` to continue processing all devices
+regardless of authentication failures — useful for re-runs where credentials are known
+good but some devices in the list use different credentials. Default: `$true`
 
 ## DEVICE MENU
 
@@ -744,6 +753,10 @@ Process up to 5 devices in parallel:
 Parallel execution with a wider hostname column for long device names:
 
     .\ssh-cmd-runner.ps1 -MaxParallelJobs 10 -HostnameColumnWidth 28
+
+Disable auth abort for re-runs where some devices use different credentials:
+
+    .\ssh-cmd-runner.ps1 -AuthAbortEnabled $false
 
 Update config.json with any new parameters added in recent script updates:
 

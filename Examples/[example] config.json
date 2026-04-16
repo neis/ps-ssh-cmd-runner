@@ -22,5 +22,6 @@
   "DeleteAfterCompress": false,
   "MaxParallelJobs": 1,
   "HostnameColumnWidth": 16,
-  "DeviceMenu": false
+  "DeviceMenu": false,
+  "AuthAbortEnabled": true
 }

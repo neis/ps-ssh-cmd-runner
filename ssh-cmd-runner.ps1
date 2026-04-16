@@ -236,7 +236,10 @@ param(
     [switch]$UpdateConfig,
 
     [Parameter(Mandatory = $false, HelpMessage = "Present an interactive menu to select which OS types to process before starting")]
-    [switch]$DeviceMenu
+    [switch]$DeviceMenu,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Abort the run after 3 consecutive authentication failures (default: true). Set to false to continue processing all devices regardless of auth failures.")]
+    [bool]$AuthAbortEnabled = $true
 )
 
 # ---------------------------------------------
@@ -393,6 +396,9 @@ if (Test-Path $configPath -PathType Leaf) {
     }
     if (-not $PSBoundParameters.ContainsKey('DeviceMenu') -and $config.PSObject.Properties.Name -contains 'DeviceMenu') {
         $DeviceMenu = [bool]$config.DeviceMenu
+    }
+    if (-not $PSBoundParameters.ContainsKey('AuthAbortEnabled') -and $config.PSObject.Properties.Name -contains 'AuthAbortEnabled') {
+        $AuthAbortEnabled = [bool]$config.AuthAbortEnabled
     }
 }
 
@@ -2208,7 +2214,7 @@ if ($MaxParallelJobs -le 1) {
             -User $username -Pass $password
         Write-DeviceOutputFiles -Result $sessionResult
 
-        if ($sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
+        if ($AuthAbortEnabled -and $sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
             $results.Add($sessionResult)
             Write-Host ""
             Write-C "  ERROR: Authentication rejected on $maxAuthRetries consecutive devices. Aborting." -Color Red
@@ -2494,7 +2500,7 @@ else {
                 $results.Add($sessionResult)
                     Write-DeviceOutputFiles -Result $sessionResult
 
-                if ($sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
+                if ($AuthAbortEnabled -and $sessionResult.AuthFailed -and $authRetryCount -ge $maxAuthRetries) {
                     $authAbort = $true
                 }
 
