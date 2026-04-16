@@ -1021,6 +1021,7 @@ function Read-UntilPrompt {
         'no matching cipher found',
         'no matching key exchange method found',
         'no matching host key type found',
+        'Invalid key length',
         'Connection refused',
         'Connection reset',
         'Connection closed',
@@ -1090,7 +1091,15 @@ function Read-UntilPrompt {
                     # Extract the specific fatal error line for the error message.
                     $fatalLine = ($stderrContent -split "`n" | Where-Object { $_ -match $fatalSshRegex } | Select-Object -First 1).Trim()
                     if ($null -ne $PromptText) { $PromptText.Value = "" }
-                    throw "SSH connection failed: $fatalLine"
+                    # Append remediation hint for key length errors
+                    $hint = ""
+                    if ($fatalLine -match 'Invalid key length') {
+                        # Try to extract the host key algorithm from the kex negotiation in stderr
+                        $keyAlgo = ""
+                        if ($stderrContent -match 'kex: host key algorithm:\s*(\S+)') { $keyAlgo = " ($($Matches[1]))" }
+                        $hint = " -- device host key$keyAlgo is below the minimum RSA size (default 2048). Add '-o RequiredRSASize=1024' to ExtraSSHOptions."
+                    }
+                    throw "SSH connection failed: ${fatalLine}${hint}"
                 }
             }
         }
