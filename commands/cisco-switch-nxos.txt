@@ -6,10 +6,11 @@ show interface
 show interface status
 show cdp neighbors detail
 show lldp neighbors detail
-show ip route vrf all
 show mac address-table
+show ip route vrf all
 show ip arp detail vrf all
 show port-channel summary
+show interfaces transceiver
 show interfaces transceiver details
 show ip ospf neighbor
 show ip ospf interface brief
@@ -17,3 +18,4 @@ show ip eigrp neighbors
 show ip bgp summary
 show ip bfp neighbors
 show running-config
+show log last 500
