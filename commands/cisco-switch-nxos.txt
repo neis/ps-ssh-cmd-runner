@@ -16,6 +16,6 @@ show ip ospf neighbor
 show ip ospf interface brief
 show ip eigrp neighbors
 show ip bgp summary
-show ip bfp neighbors
+show ip bgp neighbors
 show running-config
 show log last 500
