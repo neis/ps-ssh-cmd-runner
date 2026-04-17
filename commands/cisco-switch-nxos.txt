@@ -10,8 +10,8 @@ show mac address-table
 show ip route vrf all
 show ip arp detail vrf all
 show port-channel summary
-show interfaces transceiver
-show interfaces transceiver details
+show interface transceiver
+show interface transceiver details
 show ip ospf neighbor
 show ip ospf interface brief
 show ip eigrp neighbors
