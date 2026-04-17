@@ -1035,7 +1035,10 @@ function Read-UntilPrompt {
         'No route to host',
         'Network is unreachable',
         'Host key verification failed',
-        'kex_exchange_identification.*Connection'
+        'kex_exchange_identification.*Connection',
+        'Permission denied',
+        'Authentication failed',
+        'Too many authentication failures'
     )
     $fatalSshRegex = ($fatalSshPatterns -join '|')
 
@@ -1106,6 +1109,15 @@ function Read-UntilPrompt {
                         $hint = " -- device host key$keyAlgo is below the minimum RSA size (default 2048). Add '-o RequiredRSASize=1024' to ExtraSSHOptions."
                     }
                     throw "SSH connection failed: ${fatalLine}${hint}"
+                }
+                # Vendor-agnostic auth failure detection: some devices (e.g. Cisco IOS)
+                # never emit "Permission denied" but call SSH_ASKPASS for each password
+                # attempt. Two or more read_passphrase calls means the first password
+                # was rejected and SSH requested another — definitive auth failure.
+                $askpassCount = ([regex]::Matches($stderrContent, 'read_passphrase')).Count
+                if ($askpassCount -ge 2) {
+                    if ($null -ne $PromptText) { $PromptText.Value = "" }
+                    throw "SSH connection failed: Authentication rejected (device requested multiple password attempts)"
                 }
             }
         }
