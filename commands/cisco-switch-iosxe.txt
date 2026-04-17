@@ -5,9 +5,11 @@ show interface
 show interface status
 show cdp neighbors detail
 show lldp neighbors detail
+show ip route
 show ip route vrf all
 show power inline
 show mac address-table
+show ip arp
 show ip arp vrf all
 show etherchannel summary
 show interface transceiver
