@@ -1,5 +1,6 @@
 # Cisco NX-OS commands (paging disabled automatically via "terminal length 0")
 show version
+show vdc detail
 show inventory
 show interface
 show interface status
