@@ -46,6 +46,27 @@ subsequent runs do not re-prompt as long as the stored credentials remain valid.
 
    The `Category` column is optional (for backward compatibility, `IP,OS` still works).
 
+   Two further optional columns, `ExcludeCommands` and `AddCommands`, tailor the command
+   list per device — handy when one device would produce an unreasonably large output for a
+   command that is fine everywhere else (e.g. `show ip route` on an Internet BGP router with
+   several full provider tables). List multiple commands as a quoted, comma-separated value:
+
+   ```csv
+   IP,Category,OS,ExcludeCommands,AddCommands
+   10.1.1.1,Switch,cisco-switch-iosxe,,
+   10.1.1.2,Router,cisco-router-iosxe,"show ip route,show ip bgp","show ip route summary"
+   10.1.1.3,Router,cisco-router-iosxr,show tech-support,
+   ```
+
+   - `ExcludeCommands` removes the listed commands from that device's run (matched
+     case-insensitively against the OS command file). An exclude that matches nothing prints
+     a warning so typos are caught.
+   - `AddCommands` appends extra commands for that device — typically a lighter-weight
+     alternative to something excluded (e.g. `show ip route summary` in place of the full
+     table). Additions already present are skipped.
+   - Leave the fields empty (or omit the columns entirely) for devices that should run the
+     unmodified OS command list.
+
 2. Create a `commands/` directory with per-OS command files:
 
    ```
@@ -128,8 +149,37 @@ Path to a CSV file with `IP,Category,OS` columns (header row required). Each row
 a device IP, an optional free-text category (e.g. "Switch", "Router", "WLC"), and its OS
 type. See [Supported OS Types](#supported-os-types) for valid OS values. The `Category`
 column is optional for backward compatibility — files with only `IP,OS` columns are still
-accepted (Category defaults to empty). Blank rows and rows where the IP starts with `#`
-are ignored. Default: `.\devices.txt`
+accepted (Category defaults to empty). The optional `ExcludeCommands` and `AddCommands`
+columns override the command list for individual devices (see
+[Per-Device Command Overrides](#per-device-command-overrides)). Blank rows and rows where the
+IP starts with `#` are ignored. Default: `.\devices.txt`
+
+### Per-Device Command Overrides
+
+Normally every device of a given OS runs that OS's full command file. The optional
+`ExcludeCommands` and `AddCommands` columns in the device CSV tailor the list per device —
+useful when a single device produces an unreasonably large output for a command that is fine
+elsewhere (a classic case is `show ip route` on an Internet BGP router with several full
+provider tables, which can stream for 30+ minutes without ever timing out).
+
+List multiple commands in a field as a quoted, comma-separated value — the surrounding quotes
+let the commas coexist with the CSV's own commas, and command spaces need no escaping:
+
+```csv
+IP,Category,OS,ExcludeCommands,AddCommands
+10.1.1.2,Router,cisco-router-iosxe,"show ip route,show ip bgp","show ip route summary"
+```
+
+- **ExcludeCommands** — commands removed from that device's run, matched case-insensitively
+  (and trimmed) against the OS command file. An exclude that matches nothing prints a warning
+  so typos surface early.
+- **AddCommands** — commands appended for that device, typically a lighter-weight alternative
+  to something excluded. Commands already present after exclusion are skipped.
+- A device whose list is emptied entirely by exclusions still connects (and logs in) but runs
+  no commands; a warning is printed.
+
+Overrides apply to the log, JSON, and Netcortex output. Note that an added command appears in
+the Netcortex file only if it is also present in that OS's Netcortex command list.
 
 ### CommandsDirectory `[string]`
 

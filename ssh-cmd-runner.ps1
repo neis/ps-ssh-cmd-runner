@@ -346,6 +346,39 @@ function Show-SelectionMenu {
     }
 }
 
+# Helper: build a device's effective command list from the OS base list by
+# removing per-device excluded commands and appending per-device additional
+# commands. Matching is case-insensitive and trimmed. Additions that are already
+# present (after exclusion) are skipped; the rest are appended in order at the end.
+# Returns a [string[]] (always an array, even for a single command).
+function Resolve-DeviceCommandList {
+    param(
+        [string[]]$BaseCommands,
+        [string[]]$ExcludeCommands = @(),
+        [string[]]$AddCommands = @()
+    )
+    $resolved = [System.Collections.Generic.List[string]]::new()
+    $excludeSet = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@($ExcludeCommands | ForEach-Object { $_.Trim() }),
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($c in $BaseCommands) {
+        if (-not $excludeSet.Contains($c.Trim())) { $resolved.Add($c) }
+    }
+    $presentSet = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@($resolved | ForEach-Object { $_.Trim() }),
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($a in $AddCommands) {
+        $t = $a.Trim()
+        if ($t -ne "" -and -not $presentSet.Contains($t)) {
+            $resolved.Add($t)
+            $presentSet.Add($t) | Out-Null
+        }
+    }
+    return , ([string[]]$resolved.ToArray())
+}
+
 if (Test-Path $configPath -PathType Leaf) {
     try {
         $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -569,6 +602,12 @@ if (-not $CompressOnly) {
         exit 1
     }
     $hasCategory = 'Category' -in $csvColumns
+    # Optional per-device command overrides. Each field is a standard CSV cell that
+    # may hold multiple commands as a quoted, comma-separated list
+    # (e.g. "show ip route,show ip bgp"). ConvertFrom-Csv strips the quotes, so the
+    # value here is a plain comma-separated string that we split below.
+    $hasExclude  = 'ExcludeCommands' -in $csvColumns
+    $hasAdd      = 'AddCommands' -in $csvColumns
 
     # Validate OS values and filter blanks/comments
     $devices = @()
@@ -578,6 +617,12 @@ if (-not $CompressOnly) {
         $ip       = if ($row.IP) { $row.IP.Trim() } else { "" }
         $os       = if ($row.OS) { $row.OS.Trim().ToLower() } else { "" }
         $category = if ($hasCategory -and $row.Category) { $row.Category.Trim() } else { "" }
+        $excludeCmds = if ($hasExclude -and $row.ExcludeCommands) {
+            @($row.ExcludeCommands -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+        } else { @() }
+        $addCmds = if ($hasAdd -and $row.AddCommands) {
+            @($row.AddCommands -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+        } else { @() }
         if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
         if ([string]::IsNullOrWhiteSpace($os)) {
             Write-C "ERROR: Device '$ip' on line $lineNum of '$DeviceListFile' is missing the OS field." -Color Red
@@ -589,7 +634,7 @@ if (-not $CompressOnly) {
             Write-C "  Valid OS types: $($validOSTypes.Keys -join ', ')" -Color Red
             exit 1
         }
-        $devices += [PSCustomObject]@{ IP = $ip; Category = $category; OS = $os }
+        $devices += [PSCustomObject]@{ IP = $ip; Category = $category; OS = $os; ExcludeCommands = $excludeCmds; AddCommands = $addCmds }
     }
 
     if ($devices.Count -eq 0) {
@@ -755,6 +800,39 @@ if (-not $CompressOnly) {
                 exit 1
             }
         }
+    }
+
+    # ---------------------------------------------
+    # PER-DEVICE COMMAND RESOLUTION
+    # Apply optional per-device ExcludeCommands / AddCommands (from the device CSV) to
+    # each device's OS base command list and stash the effective list on the device
+    # object as ResolvedCommands. Warn (don't fail) on excludes that match nothing —
+    # usually a typo — and on devices left with an empty command list.
+    # ---------------------------------------------
+    $overrideCount = 0
+    foreach ($device in $devices) {
+        $base = @($commandsByOS[$device.OS])
+        if ($device.ExcludeCommands.Count -gt 0 -or $device.AddCommands.Count -gt 0) { $overrideCount++ }
+
+        if ($device.ExcludeCommands.Count -gt 0) {
+            $baseSet = [System.Collections.Generic.HashSet[string]]::new(
+                [string[]]@($base | ForEach-Object { $_.Trim() }),
+                [System.StringComparer]::OrdinalIgnoreCase
+            )
+            $unmatched = @($device.ExcludeCommands | Where-Object { -not $baseSet.Contains($_) })
+            if ($unmatched.Count -gt 0) {
+                Write-C "WARNING: Device '$($device.IP)' excludes command(s) not found in the '$($device.OS)' list: $($unmatched -join ', ')" -Color Yellow
+            }
+        }
+
+        $resolved = Resolve-DeviceCommandList -BaseCommands $base -ExcludeCommands $device.ExcludeCommands -AddCommands $device.AddCommands
+        if ($resolved.Count -eq 0) {
+            Write-C "WARNING: Device '$($device.IP)' has no commands left after exclusions - it will connect but run no commands." -Color Yellow
+        }
+        $device | Add-Member -NotePropertyName ResolvedCommands -NotePropertyValue $resolved -Force
+    }
+    if ($overrideCount -gt 0) {
+        Write-C "Applied per-device command overrides to $overrideCount device(s)." -Color Cyan
     }
 }
 
@@ -2262,7 +2340,7 @@ if ($MaxParallelJobs -le 1) {
         $ip = $device.IP
         $os = $device.OS
 
-        $commands = $commandsByOS[$os]
+        $commands = if ($null -ne $device.ResolvedCommands) { $device.ResolvedCommands } else { $commandsByOS[$os] }
         $osProfile = $validOSTypes[$os]
         $pagingCmds = @($osProfile.PagingCommand)
         $exitCmds = $osProfile.ExitCommands
@@ -2385,10 +2463,11 @@ else {
     foreach ($device in $devices) {
         $deviceNum++
         $deviceQueue.Enqueue([PSCustomObject]@{
-                DeviceNum = $deviceNum
-                IP        = $device.IP
-                Category  = $device.Category
-                OS        = $device.OS
+                DeviceNum        = $deviceNum
+                IP               = $device.IP
+                Category         = $device.Category
+                OS               = $device.OS
+                ResolvedCommands = $device.ResolvedCommands
             })
     }
 
@@ -2465,7 +2544,7 @@ else {
             $ip = $d.IP
             $os = $d.OS
 
-            $commands = $commandsByOS[$os]
+            $commands = if ($null -ne $d.ResolvedCommands) { $d.ResolvedCommands } else { $commandsByOS[$os] }
             $osProfile = $validOSTypes[$os]
             $pagingCmds = @($osProfile.PagingCommand)
             $exitCmds = $osProfile.ExitCommands

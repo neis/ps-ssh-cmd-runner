@@ -1,7 +1,7 @@
-IP,Category,OS
-192.168.1.1,Switch,cisco-switch-iosxe
-192.168.1.2,Router,cisco-router-iosxe
-192.168.1.3,Switch,cisco-switch-nxos
-192.168.1.4,WLC,cisco-wlc-aireos
-192.168.1.5,WLC,cisco-wlc-iosxe
-192.168.1.6,Router,cisco-router-iosxr
+IP,Category,OS,ExcludeCommands,AddCommands
+192.168.1.1,Switch,cisco-switch-iosxe,,
+192.168.1.2,Router,cisco-router-iosxe,"show ip route,show ip bgp","show ip route summary"
+192.168.1.3,Switch,cisco-switch-nxos,,
+192.168.1.4,WLC,cisco-wlc-aireos,,
+192.168.1.5,WLC,cisco-wlc-iosxe,,
+192.168.1.6,Router,cisco-router-iosxr,show tech-support,
