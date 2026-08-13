@@ -1517,7 +1517,7 @@ function Invoke-SSHSession {
                     $usePTY = $true
                     continue   # finally cleans up, loop retries with -tt
                 }
-                if (-not $proc.HasExited) { $proc.Kill() }
+                try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
                 throw "Timed out waiting for initial device prompt after ${InitialCmdTimeoutSec}s. Consider increasing -InitialPromptTimeoutSeconds."
             }
 
@@ -1630,7 +1630,10 @@ function Invoke-SSHSession {
                     if ($cmdOutputBuilder.Length -gt 0) {
                         $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
                     }
-                    $proc.Kill()
+                    # The device may have already closed the session (e.g. it dropped the
+                    # connection right as the idle timeout fired). Guard the kill so a
+                    # "process has exited" exception doesn't mask the real timeout error.
+                    try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
                     throw "Timed out waiting for device prompt after command '$cmd'."
                 }
 
@@ -1685,7 +1688,8 @@ function Invoke-SSHSession {
             if (-not $exited) {
                 # All commands completed successfully; the process just didn't exit
                 # cleanly (common with PTY sessions). Kill it — this is not an error.
-                $proc.Kill()
+                # Guard against a race where it exits between WaitForExit and Kill.
+                try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
                 Write-Verbose "SSH process on $IPAddress did not exit within 3s after session end - killed."
             }
 
