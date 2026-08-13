@@ -39,7 +39,7 @@
     Maximum time in seconds to wait for a device to return its prompt after each
     command is sent. This covers device processing time plus the time to transmit
     all output lines. Increase this for commands with large output (e.g. show
-    interface on a chassis with many ports). Default is 30.
+    interface on a chassis with many ports). Default is 30. Valid range: 5-900.
     Note: -TimeoutSeconds controls only the initial SSH connection handshake.
 
 .PARAMETER InitialPromptTimeoutSeconds
@@ -174,7 +174,7 @@ param(
     [int]$CommandDelayMs = 100,
 
     [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait for device prompt after each command (default 30). Increase for commands with large output.")]
-    [ValidateRange(5, 600)]
+    [ValidateRange(5, 900)]
     [int]$CommandTimeoutSeconds = 30,
 
     [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait for the first device prompt after login, covering auth + banner + prompt (default 60). Separate from CommandTimeoutSeconds.")]
