@@ -3,12 +3,24 @@
 show version
 show inventory
 show interfaces description
+show interfaces
 show ipv4 interface brief
+show isis neighbors
+show isis interface
+show mpls ldp neighbor
 show bgp summary
-show route summary
+show bgp neighbors
+show ospf neighbors
+show ospf interface
+show route
+show route vrf all
+show vrf all
+show arp
+show arp vrf all
 show cdp neighbors detail
+show lldp neighbors detail
 show running-config
 show platform
 show redundancy summary
 show environment
-show logging last 100
+show logging

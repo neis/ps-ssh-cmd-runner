@@ -10,4 +10,5 @@ show interface summary
 show port summary
 show flexconnect group summary
 show client summary
-show run
+show run-config commands
+show msglog

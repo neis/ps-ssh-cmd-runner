@@ -14,4 +14,5 @@ show wlan summary
 show interface
 show wireless tag policy summary
 show etherchannel summary
-show run
+show running-config
+show logging last 100
