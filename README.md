@@ -167,6 +167,15 @@ before it emits the first byte of output. Valid range: 5-900. Default: `30`
 > Note: `-TimeoutSeconds` controls the initial SSH connection handshake only.
 > `-CommandTimeoutSeconds` governs the per-command wait.
 
+When a command does stall past this timeout, it is **survivable**: the script records the
+command, writes `Command timed out during processing` in place of its (partial, likely garbled)
+output — so downstream parsers aren't fed incomplete data — then resyncs the session to a clean
+prompt and continues with the remaining commands. The device finishes with a **Warning** status
+and the timed-out command(s) named in the Reason column, e.g.
+`Commands timed out during processing: show ip route, show bgp`. Only if the session cannot be
+resynced (device hung or connection dead) is the device marked **Failed** — and even then a
+best-effort graceful logout is attempted first so the device can reap its VTY.
+
 ### InitialPromptTimeoutSeconds `[int]`
 
 Maximum time in seconds to wait for the first device prompt after login. This window covers
@@ -367,11 +376,15 @@ as each device completes:
    # | Category | IP              | OS                 | Status    |   Time | Hostname         | Reason
 -----+----------+-----------------+--------------------+-----------+--------+------------------+--------
  1/5 | Switch   | 10.1.50.1       | cisco-switch-iosxe | Success   |  20.15 | s4500x-1         |
- 2/5 | Switch   | 10.1.50.2       | cisco-switch-iosxe | Success   |  22.03 | s3850x-1         |
+ 2/5 | Router   | 10.1.50.2       | cisco-router-iosxe | Warning   |  95.40 | bgp-edge-1       | Commands timed out during processing: show ip route
  3/5 | Router   | 10.1.50.3       | cisco-router-iosxe |           |        |                  |
  4/5 | Switch   | 10.1.50.4       | cisco-switch-nxos  | Failed    |   0.00 |                  | Connection timed out
  5/5 | WLC      | 10.1.50.5       | cisco-wlc-aireos   | Skipped   |   0.00 |                  | No ping response
 ```
+
+The **Warning** status means the device connected and ran, but one or more commands stalled past
+the inactivity timeout; those commands show `Command timed out during processing` in the output
+files. Warnings do not count as failures (e.g. `-CompressWhen SuccessOnly` still archives).
 
 In sequential mode (`MaxParallelJobs = 1`), the original inline output format is used
 instead of the table.

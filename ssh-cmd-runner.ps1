@@ -1263,6 +1263,11 @@ function Invoke-SSHSession {
         CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
     }
 
+    # Commands whose output stalled past the inactivity timeout. A non-empty list
+    # makes the device a "Warning" (partial) result rather than a hard failure, and
+    # its contents populate the reason column and the per-command placeholder output.
+    $timedOutCommands = [System.Collections.Generic.List[string]]::new()
+
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $usePTY = $AllocatePTY
 
@@ -1625,16 +1630,68 @@ function Invoke-SSHSession {
                 $cmdPrompt = $lastPrompt
                 $lastPrompt = ""
                 if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout)) {
-                    # Flush any partial output received before the timeout so it appears
-                    # in the failure log's PARTIAL OUTPUT section for troubleshooting.
-                    if ($cmdOutputBuilder.Length -gt 0) {
-                        $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
+                    # The command's output stalled past the inactivity timeout. Make this
+                    # survivable: record the command, substitute a placeholder for its
+                    # (partial, likely garbled) output so downstream parsers aren't tripped
+                    # up, then try to resync the session to a clean prompt before continuing.
+                    $timedOutCommands.Add($cmd)
+                    $placeholder = "Command timed out during processing"
+
+                    # Log file + structured output both get the placeholder, never the
+                    # partial capture in $cmdOutputBuilder (which is discarded).
+                    $stdOutBuilder.AppendLine($placeholder) | Out-Null
+                    $result.CommandResults.Add([PSCustomObject]@{
+                            command    = $cmd
+                            prompt     = $cmdPrompt
+                            raw_output = [string[]]@($placeholder)
+                        })
+
+                    # Resync: drain the still-arriving output from the timed-out command
+                    # (discarded, not logged) until a fresh prompt appears. First give the
+                    # device a chance to finish on its own; if that also times out, nudge
+                    # with a newline and try once more.
+                    $lastPrompt = ""
+                    $resynced = $false
+                    $resyncDrain = [System.Text.StringBuilder]::new()
+                    if (Read-UntilPrompt -Queue $lineQueue -Builder $resyncDrain -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout) {
+                        $resynced = $true
                     }
-                    # The device may have already closed the session (e.g. it dropped the
-                    # connection right as the idle timeout fired). Guard the kill so a
-                    # "process has exited" exception doesn't mask the real timeout error.
-                    try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
-                    throw "Timed out waiting for device prompt after command '$cmd'."
+                    elseif (-not $proc.HasExited) {
+                        try { $proc.StandardInput.WriteLine(""); $proc.StandardInput.Flush() } catch { }
+                        if (Read-UntilPrompt -Queue $lineQueue -Builder $resyncDrain -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout) {
+                            $resynced = $true
+                        }
+                    }
+
+                    # A null-sentinel resync (stream closed) reports success but the process
+                    # is gone — treat an exited process as unrecoverable regardless.
+                    if (-not $resynced -or $proc.HasExited) {
+                        # Unrecoverable session (device hung or connection dead). Attempt a
+                        # best-effort graceful logout FIRST so the device reaps its VTY
+                        # instead of leaking it, then fall through to catch/finally which
+                        # kills ssh.exe. Mark the device Failed (reason set in catch).
+                        if (-not $proc.HasExited) {
+                            try {
+                                if ($usePTY -and $ExitCommands.Count -gt 0) {
+                                    foreach ($exitCmd in $ExitCommands) {
+                                        $proc.StandardInput.WriteLine($exitCmd)
+                                        $proc.StandardInput.Flush()
+                                        Start-Sleep -Milliseconds 150
+                                    }
+                                }
+                                $proc.StandardInput.Close()
+                                $proc.WaitForExit(1500) | Out-Null
+                            } catch { }
+                        }
+                        throw "Timed out waiting for device prompt after command '$cmd'."
+                    }
+
+                    # Resynced — emit the standard prompt separators and move on. The
+                    # drain-stale-prompts step at the top of the next iteration cleans up
+                    # any extra prompt echoes produced by the resync.
+                    $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+                    $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+                    continue
                 }
 
                 # Forward the per-command output into $stdOutBuilder so the log file
@@ -1708,7 +1765,13 @@ function Invoke-SSHSession {
             # even though all commands completed successfully. If every command ran and
             # returned a prompt, the session is successful regardless of SSH exit code.
             $allCommandsRan = ($result.CommandResults.Count -eq $CommandList.Count)
-            if ($allCommandsRan) {
+            if ($timedOutCommands.Count -gt 0) {
+                # Session completed but one or more commands stalled and were recovered.
+                # Partial success — surface the timed-out commands in the reason column.
+                $result.Status = "Warning"
+                $result.Error = "Commands timed out during processing: " + ($timedOutCommands -join ", ")
+            }
+            elseif ($allCommandsRan) {
                 $result.Status = "Success"
                 if ($proc.ExitCode -ne 0) {
                     Write-Verbose "SSH exit code $($proc.ExitCode) on $IPAddress ignored - all $($CommandList.Count) commands completed."
@@ -1795,6 +1858,11 @@ function Invoke-SSHSession {
                 # Use the last non-empty stderr line as the user-facing error.
                 $authErrLines = $catchStdErr -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
                 $result.Error = if ($authErrLines) { $authErrLines[-1] } else { "Authentication failed" }
+            }
+            elseif ($timedOutCommands.Count -gt 0) {
+                # Failure originated from an unrecoverable command timeout — name the
+                # timed-out command(s) rather than the generic "timed out" throw message.
+                $result.Error = "Commands timed out during processing: " + ($timedOutCommands -join ", ")
             }
             else {
                 $result.Error = $_.Exception.Message
@@ -2055,8 +2123,9 @@ function Write-DeviceResult {
         [int]$HostnameWidth = 16
     )
 
-    # Credential save and auth counter logic
-    if ($Result.Status -eq "Success") {
+    # Credential save and auth counter logic. A "Warning" device authenticated and
+    # ran commands successfully (some just stalled), so it counts as a good login.
+    if ($Result.Status -eq "Success" -or $Result.Status -eq "Warning") {
         if (-not $CredentialsSaved.Value) {
             if ([CredentialManager]::WriteCredential($CredLabel, $User, $Pass)) {
                 Write-Verbose "Credentials saved to Credential Manager (label: $CredLabel)."
@@ -2079,6 +2148,11 @@ function Write-DeviceResult {
         "Success" {
             Write-C -Text "Success".PadRight(9) -Color Green -NoNewline
             Write-C -Text " | $timeFmt | $hostFmt |" -Color DarkGray
+        }
+        "Warning" {
+            Write-C -Text "Warning".PadRight(9) -Color Yellow -NoNewline
+            Write-C -Text " | $timeFmt | $hostFmt | " -Color DarkGray -NoNewline
+            Write-C -Text "$($Result.Error)" -Color Yellow
         }
         "Skipped" {
             Write-C -Text "Skipped".PadRight(9) -Color Orange -NoNewline
@@ -2115,7 +2189,10 @@ foreach ($d in $devices) {
 # Called from both sequential and parallel result handlers so output is durable.
 function Write-DeviceOutputFiles {
     param([PSCustomObject]$Result)
-    if ($Result.Status -ne "Success") { return }
+    # Warning devices ran to completion (with placeholders for timed-out commands),
+    # so their per-device output is still written — the placeholders keep partial,
+    # garbled command output out of the JSON/Netcortex files.
+    if ($Result.Status -ne "Success" -and $Result.Status -ne "Warning") { return }
 
     $safeDevice = ConvertTo-SafeFileName $Result.DeviceName
     $safeIP     = ConvertTo-SafeFileName $Result.IPAddress
@@ -2600,6 +2677,7 @@ else {
 # OUTPUT AGGREGATES
 # ---------------------------------------------
 $successResults = @($results | Where-Object { $_.Status -eq "Success" })
+$warningResults = @($results | Where-Object { $_.Status -eq "Warning" })
 $failedIPs = @($results | Where-Object { $_.Status -eq "Failed" } | ForEach-Object { $_.IPAddress })
 
 # ---------------------------------------------
@@ -2613,12 +2691,14 @@ if ($JsonEnabled -and $JsonSessionFileEnabled) {
         result             = [ordered]@{
             total   = $results.Count
             success = $successResults.Count
+            warning = $warningResults.Count
             failed  = $failedIPs.Count
         }
         devices            = [ordered]@{
-            count               = $results.Count
-            ip_addresses        = @($results | ForEach-Object { $_.IPAddress })
-            failed_ip_addresses = @($failedIPs)
+            count                = $results.Count
+            ip_addresses         = @($results | ForEach-Object { $_.IPAddress })
+            warning_ip_addresses = @($warningResults | ForEach-Object { $_.IPAddress })
+            failed_ip_addresses  = @($failedIPs)
         }
         commands_directory = $CommandsDirectory
         categories         = [ordered]@{}
@@ -2644,6 +2724,7 @@ if ($JsonEnabled -and $JsonSessionFileEnabled) {
 # SUMMARY REPORT
 # ---------------------------------------------
 $successCount = @($results | Where-Object { $_.Status -eq "Success" }).Count
+$warningCount = @($results | Where-Object { $_.Status -eq "Warning" }).Count
 $skippedCount = @($results | Where-Object { $_.Status -eq "Skipped" }).Count
 $failCount = @($results | Where-Object { $_.Status -eq "Failed" }).Count
 $cancelledCount = @($results | Where-Object { $_.Status -eq "Cancelled" }).Count
@@ -2651,6 +2732,7 @@ $failColor = if ($failCount -gt 0) { "Red" } else { "Gray" }
 
 $totalStr = "$($results.Count)".PadRight(36)
 $successStr = "$successCount".PadRight(36)
+$warningStr = "$warningCount".PadRight(36)
 $skippedStr = "$skippedCount".PadRight(36)
 $failStr = "$failCount".PadRight(36)
 $cancelledStr = "$cancelledCount".PadRight(36)
@@ -2663,6 +2745,11 @@ Write-C "|  Total     : ${totalStr}|" -Color Gray
 Write-Host "|  Succeeded : " -NoNewline
 Write-C "${successStr}" -Color Green -NoNewline
 Write-Host "|"
+if ($warningCount -gt 0) {
+    Write-Host "|  Warnings  : " -NoNewline
+    Write-C "${warningStr}" -Color Yellow -NoNewline
+    Write-Host "|"
+}
 if ($skippedCount -gt 0) {
     Write-Host "|  Skipped   : " -NoNewline
     Write-C "${skippedStr}" -Color Orange -NoNewline
