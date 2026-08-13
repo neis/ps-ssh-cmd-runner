@@ -156,10 +156,13 @@ Valid range: 0-10000. Default: `100`
 
 ### CommandTimeoutSeconds `[int]`
 
-Maximum time in seconds to wait for the device to return its prompt after each command is
-sent. Covers device processing time plus transmission of all output lines. Increase this
-value for commands with large output (e.g. `show interface` on a chassis with many ports).
-Valid range: 5-600. Default: `30`
+Inactivity (idle) timeout in seconds for each command: the maximum time to wait with **no new
+output** before giving up. The deadline resets every time the device sends another line, so a
+command with very large output (e.g. `show ip route` on a BGP router with full provider tables)
+can stream for as long as it needs and still complete — only a genuine stall trips the timeout.
+Because it measures the gap between lines rather than total duration, it can stay small. It must,
+however, exceed the longest expected quiet gap, including any time the device spends computing
+before it emits the first byte of output. Valid range: 5-900. Default: `30`
 
 > Note: `-TimeoutSeconds` controls the initial SSH connection handshake only.
 > `-CommandTimeoutSeconds` governs the per-command wait.

@@ -36,10 +36,14 @@
     operation, or increase for slower devices. Valid range: 0-10000.
 
 .PARAMETER CommandTimeoutSeconds
-    Maximum time in seconds to wait for a device to return its prompt after each
-    command is sent. This covers device processing time plus the time to transmit
-    all output lines. Increase this for commands with large output (e.g. show
-    interface on a chassis with many ports). Default is 30. Valid range: 5-900.
+    Inactivity (idle) timeout in seconds for each command: the maximum time to wait
+    with NO new output before giving up on a command. The deadline resets every time
+    the device sends another line, so a command producing very large output (e.g.
+    "show ip route" on a BGP router with full provider tables) can stream for as long
+    as it likes and still complete — only a genuine stall trips the timeout. Because
+    it measures the gap between lines rather than total duration, this can stay small
+    (default 30). It must exceed the longest expected quiet gap, including any time the
+    device spends computing before it emits the first byte of output. Valid range: 5-900.
     Note: -TimeoutSeconds controls only the initial SSH connection handshake.
 
 .PARAMETER InitialPromptTimeoutSeconds
@@ -173,7 +177,7 @@ param(
     [ValidateRange(0, 10000)]
     [int]$CommandDelayMs = 100,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Seconds to wait for device prompt after each command (default 30). Increase for commands with large output.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Inactivity timeout per command: max seconds with no new output before giving up (default 30). The deadline resets on each line, so large streaming output still completes.")]
     [ValidateRange(5, 900)]
     [int]$CommandTimeoutSeconds = 30,
 
@@ -997,6 +1001,11 @@ function ConvertTo-SafeFileName {
 # HELPER FUNCTION: Read stdout lines from a ConcurrentQueue until a device
 # CLI prompt is detected or the timeout expires.
 # Returns $true if a prompt was found, $false if the call timed out.
+#
+# By default TimeoutMs is a total wait. With -InactivityTimeout it becomes an
+# idle timeout: the deadline is pushed forward on every data line received, so the
+# call only fails after TimeoutMs elapses with NO new data. Used for per-command
+# reads so large streaming output (e.g. a full BGP route table) can complete.
 # When a prompt is found it is NOT written to Builder — instead it is returned
 # via the [ref] $PromptText parameter so the caller can join it with the
 # echoed command that follows, reproducing the natural "hostname#command" layout.
@@ -1017,7 +1026,8 @@ function Read-UntilPrompt {
         [System.IO.StreamWriter]$StdIn = $null,
         [System.Text.RegularExpressions.Regex]$InteractiveRegex = $null,
         [System.Text.RegularExpressions.Regex]$PagerRegex = $null,
-        [System.Text.StringBuilder]$StdErrBuilder = $null
+        [System.Text.StringBuilder]$StdErrBuilder = $null,
+        [switch]$InactivityTimeout
     )
 
     # Known fatal SSH error patterns — if any appear in stderr, fail immediately
@@ -1086,6 +1096,11 @@ function Read-UntilPrompt {
                 continue
             }
             $Builder.AppendLine($line) | Out-Null
+            # Inactivity (idle) timeout: as long as the device keeps streaming data,
+            # push the deadline forward so TimeoutMs is a max gap BETWEEN lines rather
+            # than a total wait. Lets arbitrarily large output complete while still
+            # failing fast on a true stall. Opt-in — only the per-command read sets this.
+            if ($InactivityTimeout) { $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs) }
         }
         else {
             Start-Sleep -Milliseconds 50
@@ -1609,7 +1624,7 @@ function Invoke-SSHSession {
                 # echo line (e.g. "cs3850x-1#term len 0") without re-parsing raw output.
                 $cmdPrompt = $lastPrompt
                 $lastPrompt = ""
-                if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex)) {
+                if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout)) {
                     # Flush any partial output received before the timeout so it appears
                     # in the failure log's PARTIAL OUTPUT section for troubleshooting.
                     if ($cmdOutputBuilder.Length -gt 0) {
