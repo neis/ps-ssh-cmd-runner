@@ -92,6 +92,20 @@
     When $false, per-device JSON files are still written if JsonEnabled is $true, but the
     session summary file is skipped. Default is $true.
 
+.PARAMETER CollectionSummaryEnabled
+    Enable or disable the persistent collection summary JSON written to JsonDirectory. This is
+    a single, consistently-named file (see CollectionSummaryFile) that rolls up every device in
+    the run — category, IP, OS, status, duration, hostname, reason, per-command status, and the
+    excluded/added commands — including devices that failed, were skipped, or cancelled and thus
+    have no per-device JSON. It MERGES across runs (upserting devices by IP, upgrade-only so a
+    worse re-run never overwrites a better result) and is archived/removed with JsonDirectory
+    when DeleteAfterCompress deletes it. Independent of JsonEnabled. Default is $true.
+
+.PARAMETER CollectionSummaryFile
+    Filename (within JsonDirectory) for the collection summary JSON. Kept consistent so
+    downstream parsers can always locate it among the per-device JSON files.
+    Default is "collection-summary.json".
+
 .PARAMETER NetcortexEnabled
     Enable or disable Netcortex raw output text files. When $false, no .txt files are written
     to NetcortexDirectory. Default is $false.
@@ -205,6 +219,12 @@ param(
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable or disable session summary JSON file (default: true)")]
     [bool]$JsonSessionFileEnabled = $true,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Enable or disable the persistent, consistently-named collection summary JSON (default: true)")]
+    [bool]$CollectionSummaryEnabled = $true,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Filename (in JsonDirectory) for the collection summary JSON (default: collection-summary.json)")]
+    [string]$CollectionSummaryFile = "collection-summary.json",
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable or disable Netcortex raw output files (default: false)")]
     [bool]$NetcortexEnabled = $false,
@@ -444,6 +464,12 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('AuthAbortEnabled') -and $config.PSObject.Properties.Name -contains 'AuthAbortEnabled') {
         $AuthAbortEnabled = [bool]$config.AuthAbortEnabled
     }
+    if (-not $PSBoundParameters.ContainsKey('CollectionSummaryEnabled') -and $config.PSObject.Properties.Name -contains 'CollectionSummaryEnabled') {
+        $CollectionSummaryEnabled = [bool]$config.CollectionSummaryEnabled
+    }
+    if (-not $PSBoundParameters.ContainsKey('CollectionSummaryFile') -and $config.PSObject.Properties.Name -contains 'CollectionSummaryFile') {
+        $CollectionSummaryFile = [string]$config.CollectionSummaryFile
+    }
 }
 
 # ---------------------------------------------
@@ -574,7 +600,9 @@ if ($LogEnabled) {
     if (-not (Test-Path $LogDirectory)) { New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null }
     $LogDirectory = (Resolve-Path $LogDirectory).Path
 }
-if ($JsonEnabled) {
+if ($JsonEnabled -or $CollectionSummaryEnabled) {
+    # JsonDirectory also holds the collection summary, so create/resolve it whenever either
+    # the per-device JSON or the collection summary is enabled.
     if (-not (Test-Path $JsonDirectory)) { New-Item -ItemType Directory -Path $JsonDirectory -Force | Out-Null }
     $JsonDirectory = (Resolve-Path $JsonDirectory).Path
 }
@@ -1341,6 +1369,7 @@ function Invoke-SSHSession {
         DeviceName     = ""
         Status         = "Unknown"
         LogFile        = ""
+        JsonFile       = ""   # per-device JSON leaf filename, set by Write-DeviceOutputFiles
         Error          = ""
         AuthFailed     = $false   # $true only when SSH returns a credential-rejection error
         Duration       = [TimeSpan]::Zero
@@ -1765,6 +1794,7 @@ function Invoke-SSHSession {
                         $result.CommandResults.Add([PSCustomObject]@{
                                 command    = $cmd
                                 prompt     = $cmdPrompt
+                                status     = "timedout"
                                 raw_output = [string[]]@("Command timed out during processing")
                             })
 
@@ -1823,6 +1853,7 @@ function Invoke-SSHSession {
                 $result.CommandResults.Add([PSCustomObject]@{
                         command    = $cmd
                         prompt     = $cmdPrompt
+                        status     = "successful"
                         raw_output = [string[]]$rawLines
                     })
 
@@ -2296,11 +2327,15 @@ function Write-DeviceResult {
 }
 
 # Pre-build lookup maps for per-device output (used by Write-DeviceOutputFiles)
+# $deviceByIp gives the collection-summary builder access to each device's
+# ResolvedCommands / ExcludeCommands / AddCommands / OS / Category by IP.
 $deviceOSMap       = @{}
 $deviceCategoryMap = @{}
+$deviceByIp        = @{}
 foreach ($d in $devices) {
     $deviceOSMap[$d.IP]       = $d.OS
     $deviceCategoryMap[$d.IP] = $d.Category
+    $deviceByIp[$d.IP]        = $d
 }
 
 # Helper: write per-device JSON and Netcortex files immediately after a device completes.
@@ -2317,7 +2352,11 @@ function Write-DeviceOutputFiles {
 
     # Per-device JSON
     if ($JsonEnabled) {
-        $devicePath = Join-Path $JsonDirectory "${safeDevice}_${safeIP}_${timestamp}.json"
+        $deviceJsonName = "${safeDevice}_${safeIP}_${timestamp}.json"
+        $devicePath = Join-Path $JsonDirectory $deviceJsonName
+        # Record the leaf filename on the result so the collection summary can point to it
+        # (bare name, no path — the files are transferred between machines).
+        $Result.JsonFile = $deviceJsonName
         $deviceDoc = [ordered]@{
             name      = $Result.DeviceName
             ip        = $Result.IPAddress
@@ -2837,6 +2876,117 @@ if ($JsonEnabled -and $JsonSessionFileEnabled) {
     }
     $sessionPath = Join-Path $JsonDirectory "ssh-session-${timestamp}.json"
     $sessionDoc | ConvertTo-Json -Depth 10 | Set-Content -Path $sessionPath -Encoding UTF8
+}
+
+# ---------------------------------------------
+# COLLECTION SUMMARY
+# A single, consistently-named JSON roll-up of every device in the run (including
+# failed/skipped/cancelled devices that have no per-device JSON), plus per-command
+# status and each device's excluded/added commands. It lives in JsonDirectory and
+# MERGES across runs: each run upserts its devices by IP so re-running a subset (to
+# fix failures/warnings) updates only those entries. The merge is upgrade-only — a
+# worse result never overwrites a better stored one. It is archived and removed with
+# the rest of JsonDirectory when -DeleteAfterCompress deletes the dir, so the next
+# collection naturally starts fresh.
+# ---------------------------------------------
+if ($CollectionSummaryEnabled) {
+    $summaryPath = Join-Path $JsonDirectory $CollectionSummaryFile
+
+    # Result-quality rank (higher = better/more complete). Upgrade-only: replace a
+    # device's entry only when this run's rank is >= the stored rank.
+    $statusRank = @{ 'Success' = 5; 'Warning' = 4; 'Failed' = 3; 'Cancelled' = 2; 'Skipped' = 1 }
+
+    # Load + merge any existing summary so devices not in this run are preserved.
+    $devicesMap = [ordered]@{}
+    if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
+        try {
+            $existingDoc = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+            if ($existingDoc -and $existingDoc.PSObject.Properties.Name -contains 'devices' -and $existingDoc.devices) {
+                foreach ($prop in $existingDoc.devices.PSObject.Properties) {
+                    $devicesMap[$prop.Name] = $prop.Value
+                }
+            }
+        }
+        catch {
+            Write-C "WARNING: Could not parse existing '$CollectionSummaryFile' - starting a fresh summary. ($($_.Exception.Message))" -Color Yellow
+            $devicesMap = [ordered]@{}
+        }
+    }
+
+    foreach ($r in $results) {
+        $ip  = $r.IPAddress
+        $dev = $deviceByIp[$ip]
+
+        # Per-command status list, ordered by the device's resolved command list.
+        # Commands present in CommandResults carry their real status (successful/timedout);
+        # commands in the intended list but never reached are 'notrun'.
+        $cmdStatus = @{}
+        foreach ($cr in $r.CommandResults) {
+            $st = if ($cr.PSObject.Properties.Name -contains 'status' -and $cr.status) { $cr.status } else { 'successful' }
+            $cmdStatus[$cr.command] = $st
+        }
+        $basis = if ($dev -and $dev.ResolvedCommands) { @($dev.ResolvedCommands) } else { @($r.CommandResults | ForEach-Object { $_.command }) }
+        $commandList = @(
+            foreach ($c in $basis) {
+                [ordered]@{
+                    command = $c
+                    status  = if ($cmdStatus.ContainsKey($c)) { $cmdStatus[$c] } else { 'notrun' }
+                }
+            }
+        )
+
+        $jsonFile = if ($r.PSObject.Properties.Name -contains 'JsonFile' -and $r.JsonFile) { $r.JsonFile } else { $null }
+
+        $entry = [ordered]@{
+            category          = if ($dev) { $dev.Category } else { $deviceCategoryMap[$ip] }
+            os                = if ($dev) { $dev.OS } else { $deviceOSMap[$ip] }
+            hostname          = $r.DeviceName
+            status            = $r.Status
+            duration_seconds  = [math]::Round($r.Duration.TotalSeconds, 2)
+            reason            = $r.Error
+            run_timestamp     = $r.Timestamp
+            json_file         = $jsonFile
+            commands          = $commandList
+            excluded_commands = @(if ($dev) { $dev.ExcludeCommands } else { @() })
+            added_commands    = @(if ($dev) { $dev.AddCommands } else { @() })
+        }
+
+        # Upgrade-only: keep the existing entry when this run's result is worse.
+        $newRank = if ($r.Status -and $statusRank.ContainsKey($r.Status)) { $statusRank[$r.Status] } else { 0 }
+        if ($devicesMap.Contains($ip)) {
+            $exStatus = $devicesMap[$ip].status
+            $exRank = if ($exStatus -and $statusRank.ContainsKey($exStatus)) { $statusRank[$exStatus] } else { 0 }
+            if ($newRank -lt $exRank) { continue }
+        }
+        $devicesMap[$ip] = $entry
+    }
+
+    # Totals recomputed from the merged device map.
+    $tally = [ordered]@{ total = 0; success = 0; warning = 0; failed = 0; skipped = 0; cancelled = 0 }
+    foreach ($k in @($devicesMap.Keys)) {
+        $tally.total++
+        switch ($devicesMap[$k].status) {
+            'Success'   { $tally.success++ }
+            'Warning'   { $tally.warning++ }
+            'Failed'    { $tally.failed++ }
+            'Skipped'   { $tally.skipped++ }
+            'Cancelled' { $tally.cancelled++ }
+        }
+    }
+
+    $summaryDoc = [ordered]@{
+        schema_version = 1
+        generated      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        totals         = $tally
+        devices        = $devicesMap
+    }
+    try {
+        $summaryDoc | ConvertTo-Json -Depth 20 | Set-Content -Path $summaryPath -Encoding UTF8
+        Write-Verbose "Collection summary written to $summaryPath ($($tally.total) device(s))."
+    }
+    catch {
+        Write-C "WARNING: Failed to write collection summary '$CollectionSummaryFile': $($_.Exception.Message)" -Color Yellow
+    }
 }
 
 # ---------------------------------------------

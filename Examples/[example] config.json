@@ -14,6 +14,8 @@
   "LogEnabled": true,
   "JsonEnabled": false,
   "JsonSessionFileEnabled": false,
+  "CollectionSummaryEnabled": true,
+  "CollectionSummaryFile": "collection-summary.json",
   "NetcortexEnabled": false,
   "CredentialLabel": "SSH-CMD-Runner",
   "ClearCredentials": false,

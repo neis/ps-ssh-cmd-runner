@@ -293,6 +293,17 @@ Enable or disable the session summary JSON file (`ssh-session-<timestamp>.json`)
 When `$false`, per-device JSON files are still written if `JsonEnabled` is `$true`, but the
 session summary file is skipped. Default: `$true`
 
+### CollectionSummaryEnabled `[bool]`
+
+Enable or disable the persistent collection summary JSON (see
+[Collection Summary](#collection-summary)). Independent of `JsonEnabled` — the summary is
+written even when per-device JSON is off. Default: `$true`
+
+### CollectionSummaryFile `[string]`
+
+Filename (within `JsonDirectory`) for the collection summary. Kept consistent so downstream
+parsers can always locate it among the per-device JSON files. Default: `collection-summary.json`
+
 ### NetcortexEnabled `[bool]`
 
 Enable or disable Netcortex raw output text files. When `$false`, no `.txt` files are
@@ -611,6 +622,59 @@ breakdowns:
   }
 }
 ```
+
+### Collection Summary
+
+When `CollectionSummaryEnabled` is `$true` (the default), each run writes a single,
+consistently-named `collection-summary.json` (see `CollectionSummaryFile`) into `JsonDirectory`.
+Unlike the per-device JSON files — which are written only for successful/warning devices — the
+summary rolls up **every** device in the run, including ones that **failed**, were **skipped**
+(no ping), or **cancelled**, so downstream parsers gain awareness of devices they would
+otherwise never see. It is written independently of `JsonEnabled`.
+
+Each device entry carries the same fields shown in the console table (category, IP, OS, status,
+duration, hostname, reason) plus the per-command run status, the excluded/added commands, and a
+`json_file` pointing (by bare filename) to that device's per-device JSON when one exists:
+
+```json
+{
+  "schema_version": 1,
+  "generated": "2026-08-13 20:15:00",
+  "totals": { "total": 3, "success": 1, "warning": 1, "failed": 1, "skipped": 0, "cancelled": 0 },
+  "devices": {
+    "10.254.200.120": {
+      "category": "Switch",
+      "os": "cisco-switch-nxos",
+      "hostname": "MTDC-NDB2",
+      "status": "Warning",
+      "duration_seconds": 53.2,
+      "reason": "Commands timed out during processing: show mac address-table",
+      "run_timestamp": "2026-08-13 20:14:07",
+      "json_file": "MTDC-NDB2_10.254.200.120_20260813_192145.json",
+      "commands": [
+        { "command": "show version", "status": "successful" },
+        { "command": "show ip route", "status": "notrun" },
+        { "command": "show ip route summary", "status": "successful" },
+        { "command": "show mac address-table", "status": "timedout" }
+      ],
+      "excluded_commands": ["show ip route"],
+      "added_commands": ["show ip route summary"]
+    }
+  }
+}
+```
+
+- **Per-command status**: `successful`, `timedout`, or `notrun` (in the device's intended list
+  but never reached — e.g. a device that failed mid-list, or a skipped/cancelled device).
+  Commands are ordered by the device's resolved list (after per-device excludes/adds).
+- **Merges across runs**: entries are keyed by IP and upserted, so re-running a subset (to fix
+  failures/warnings before compressing for transfer) updates only those devices and leaves the
+  rest in place. The merge is **upgrade-only** — a worse re-run never overwrites a better stored
+  result (rank `Success > Warning > Failed > Cancelled > Skipped`); an equal-or-better result
+  refreshes the entry (status, timestamp, `json_file`, commands).
+- **Reset**: the summary lives in `JsonDirectory`, so it is archived and removed along with the
+  rest of the JSON output whenever `DeleteAfterCompress $true` deletes the directory (via a
+  normal run's post-compress or `-CompressOnly`). The next collection then starts a fresh summary.
 
 ### Netcortex Output
 
