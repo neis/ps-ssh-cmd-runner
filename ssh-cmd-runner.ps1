@@ -1715,68 +1715,101 @@ function Invoke-SSHSession {
                 $cmdPrompt = $lastPrompt
                 $lastPrompt = ""
                 if (-not (Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout)) {
-                    # The command's output stalled past the inactivity timeout. Make this
-                    # survivable: record the command, substitute a placeholder for its
-                    # (partial, likely garbled) output so downstream parsers aren't tripped
-                    # up, then try to resync the session to a clean prompt before continuing.
-                    $timedOutCommands.Add($cmd)
-                    $placeholder = "Command timed out during processing"
-
-                    # Log file + structured output both get the placeholder, never the
-                    # partial capture in $cmdOutputBuilder (which is discarded).
-                    $stdOutBuilder.AppendLine($placeholder) | Out-Null
-                    $result.CommandResults.Add([PSCustomObject]@{
-                            command    = $cmd
-                            prompt     = $cmdPrompt
-                            raw_output = [string[]]@($placeholder)
-                        })
-
-                    # Resync: drain the still-arriving output from the timed-out command
-                    # (discarded, not logged) until a fresh prompt appears. First give the
-                    # device a chance to finish on its own; if that also times out, nudge
-                    # with a newline and try once more.
-                    $lastPrompt = ""
-                    $resynced = $false
-                    $resyncDrain = [System.Text.StringBuilder]::new()
-                    if (Read-UntilPrompt -Queue $lineQueue -Builder $resyncDrain -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout) {
-                        $resynced = $true
-                    }
-                    elseif (-not $proc.HasExited) {
+                    # No recognized prompt within the inactivity window. Before committing to
+                    # the timeout flow, probe with a newline: a command that actually finished
+                    # but whose prompt went undetected (e.g. some NX-OS commands glue the
+                    # prompt onto the last output line with no separating newline) answers an
+                    # Enter with a fresh prompt almost immediately, while a truly stalled
+                    # command does not. Use a short window so a real stall isn't paid twice.
+                    $probedPrompt = ""
+                    $probeFound = $false
+                    if (-not $proc.HasExited) {
                         try { $proc.StandardInput.WriteLine(""); $proc.StandardInput.Flush() } catch { }
-                        if (Read-UntilPrompt -Queue $lineQueue -Builder $resyncDrain -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout) {
-                            $resynced = $true
-                        }
+                        $probeMs = [Math]::Min($perCmdTimeoutMs, 5000)
+                        $probeFound = Read-UntilPrompt -Queue $lineQueue -Builder $cmdOutputBuilder -PromptRegex $promptRegex -TimeoutMs $probeMs -PromptText ([ref]$probedPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout
                     }
 
-                    # A null-sentinel resync (stream closed) reports success but the process
-                    # is gone — treat an exited process as unrecoverable regardless.
-                    if (-not $resynced -or $proc.HasExited) {
-                        # Unrecoverable session (device hung or connection dead). Attempt a
-                        # best-effort graceful logout FIRST so the device reaps its VTY
-                        # instead of leaking it, then fall through to catch/finally which
-                        # kills ssh.exe. Mark the device Failed (reason set in catch).
+                    if ($probeFound -and -not $proc.HasExited) {
+                        # The command had in fact completed. The newline flushed the reader's
+                        # stuck final line — which typically has the prompt glued to its end —
+                        # and then produced a clean prompt. De-glue that final line so the
+                        # captured output is clean for downstream parsers, then treat this as a
+                        # normal success (not a timeout, not a Warning).
+                        if ($probedPrompt -ne "") { $lastPrompt = $probedPrompt }
+                        if ($lastPrompt -ne "") {
+                            $deglueLines = [System.Collections.Generic.List[string]]::new()
+                            foreach ($ln in ($cmdOutputBuilder.ToString() -split "`r?`n")) { $deglueLines.Add($ln) }
+                            while ($deglueLines.Count -gt 0 -and $deglueLines[$deglueLines.Count - 1] -eq '') {
+                                $deglueLines.RemoveAt($deglueLines.Count - 1)
+                            }
+                            if ($deglueLines.Count -gt 0) {
+                                $tailPattern = [System.Text.RegularExpressions.Regex]::Escape($lastPrompt) + '[ \t]*$'
+                                $deglueLines[$deglueLines.Count - 1] = $deglueLines[$deglueLines.Count - 1] -replace $tailPattern, ''
+                            }
+                            $cmdOutputBuilder.Clear() | Out-Null
+                            foreach ($ln in $deglueLines) { $cmdOutputBuilder.AppendLine($ln) | Out-Null }
+                            Write-Verbose "Recovered '$cmd' on $IPAddress via newline probe; stripped a glued prompt from the final output line."
+                        }
+                        # fall through to the normal success handling below
+                    }
+                    else {
+                        # Genuine stall. Keep whatever partial output we received in the
+                        # human-readable log for diagnosis, but use a placeholder in the
+                        # structured JSON/Netcortex output so partial, likely-garbled data
+                        # doesn't reach downstream parsers.
+                        $timedOutCommands.Add($cmd)
+                        if ($cmdOutputBuilder.Length -gt 0) {
+                            $stdOutBuilder.Append($cmdOutputBuilder.ToString()) | Out-Null
+                        }
+                        $stdOutBuilder.AppendLine("[Command timed out during processing - partial output above, if any]") | Out-Null
+                        $result.CommandResults.Add([PSCustomObject]@{
+                                command    = $cmd
+                                prompt     = $cmdPrompt
+                                raw_output = [string[]]@("Command timed out during processing")
+                            })
+
+                        # Resync to a clean prompt (discarded) before the next command. The
+                        # probe already sent a newline, so give the device the full inactivity
+                        # window to finish draining and return a prompt.
+                        $lastPrompt = ""
+                        $resynced = $false
                         if (-not $proc.HasExited) {
-                            try {
-                                if ($usePTY -and $ExitCommands.Count -gt 0) {
-                                    foreach ($exitCmd in $ExitCommands) {
-                                        $proc.StandardInput.WriteLine($exitCmd)
-                                        $proc.StandardInput.Flush()
-                                        Start-Sleep -Milliseconds 150
-                                    }
-                                }
-                                $proc.StandardInput.Close()
-                                $proc.WaitForExit(1500) | Out-Null
-                            } catch { }
+                            $resyncDrain = [System.Text.StringBuilder]::new()
+                            if (Read-UntilPrompt -Queue $lineQueue -Builder $resyncDrain -PromptRegex $promptRegex -TimeoutMs $perCmdTimeoutMs -PromptText ([ref]$lastPrompt) -StdIn $proc.StandardInput -InteractiveRegex $interactiveRegex -InactivityTimeout) {
+                                $resynced = $true
+                            }
                         }
-                        throw "Timed out waiting for device prompt after command '$cmd'."
-                    }
 
-                    # Resynced — emit the standard prompt separators and move on. The
-                    # drain-stale-prompts step at the top of the next iteration cleans up
-                    # any extra prompt echoes produced by the resync.
-                    $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
-                    $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
-                    continue
+                        # A null-sentinel resync (stream closed) reports success but the
+                        # process is gone — treat an exited process as unrecoverable.
+                        if (-not $resynced -or $proc.HasExited) {
+                            # Unrecoverable session (device hung or connection dead). Attempt a
+                            # best-effort graceful logout FIRST so the device reaps its VTY
+                            # instead of leaking it, then fall through to catch/finally which
+                            # kills ssh.exe. Mark the device Failed (reason set in catch).
+                            if (-not $proc.HasExited) {
+                                try {
+                                    if ($usePTY -and $ExitCommands.Count -gt 0) {
+                                        foreach ($exitCmd in $ExitCommands) {
+                                            $proc.StandardInput.WriteLine($exitCmd)
+                                            $proc.StandardInput.Flush()
+                                            Start-Sleep -Milliseconds 150
+                                        }
+                                    }
+                                    $proc.StandardInput.Close()
+                                    $proc.WaitForExit(1500) | Out-Null
+                                } catch { }
+                            }
+                            throw "Timed out waiting for device prompt after command '$cmd'."
+                        }
+
+                        # Resynced — emit the standard prompt separators and move on. The
+                        # drain-stale-prompts step at the top of the next iteration cleans up
+                        # any extra prompt echoes produced by the resync.
+                        $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+                        $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
+                        continue
+                    }
                 }
 
                 # Forward the per-command output into $stdOutBuilder so the log file

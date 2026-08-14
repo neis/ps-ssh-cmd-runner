@@ -217,14 +217,25 @@ before it emits the first byte of output. Valid range: 5-900. Default: `30`
 > Note: `-TimeoutSeconds` controls the initial SSH connection handshake only.
 > `-CommandTimeoutSeconds` governs the per-command wait.
 
-When a command does stall past this timeout, it is **survivable**: the script records the
-command, writes `Command timed out during processing` in place of its (partial, likely garbled)
-output — so downstream parsers aren't fed incomplete data — then resyncs the session to a clean
-prompt and continues with the remaining commands. The device finishes with a **Warning** status
-and the timed-out command(s) named in the Reason column, e.g.
-`Commands timed out during processing: show ip route, show bgp`. Only if the session cannot be
-resynced (device hung or connection dead) is the device marked **Failed** — and even then a
-best-effort graceful logout is attempted first so the device can reap its VTY.
+When a command appears to stall past this timeout, the script first sends a newline as a
+liveness probe before giving up. Some devices (notably certain NX-OS `show` commands) finish
+their output but glue the returning prompt onto the last output line with no separating newline,
+so the prompt goes undetected and the read waits out the whole idle window even though the
+command actually completed. The probe distinguishes the two cases:
+
+- **Completed (prompt was just undetected)** — the device answers the newline with a fresh
+  prompt almost immediately. The script strips the glued prompt off the final output line (so
+  downstream parsers see clean output) and treats the command as a normal **success** — no
+  timeout, no Warning.
+- **Genuinely stalled** — the newline yields nothing. The command is **survivable**: whatever
+  partial output was received is kept in the human-readable `.log` (for diagnosis), while the
+  structured JSON and Netcortex output get `Command timed out during processing` in its place so
+  incomplete/garbled data doesn't reach downstream parsers. The session is then resynced to a
+  clean prompt and the remaining commands run. The device finishes with a **Warning** status and
+  the timed-out command(s) named in the Reason column, e.g.
+  `Commands timed out during processing: show ip route, show bgp`. Only if the session cannot be
+  resynced (device hung or connection dead) is the device marked **Failed** — and even then a
+  best-effort graceful logout is attempted first so the device can reap its VTY.
 
 ### InitialPromptTimeoutSeconds `[int]`
 
