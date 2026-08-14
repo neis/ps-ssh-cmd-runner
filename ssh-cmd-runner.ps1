@@ -357,6 +357,13 @@ function Resolve-DeviceCommandList {
         [string[]]$ExcludeCommands = @(),
         [string[]]$AddCommands = @()
     )
+    # Normalize $null to empty arrays. A PSCustomObject property holding @() comes
+    # back as $null when passed as an argument, which overrides the parameter default;
+    # piping that $null to ForEach-Object would then run once with $_ = $null and throw.
+    if ($null -eq $BaseCommands)    { $BaseCommands = @() }
+    if ($null -eq $ExcludeCommands) { $ExcludeCommands = @() }
+    if ($null -eq $AddCommands)     { $AddCommands = @() }
+
     $resolved = [System.Collections.Generic.List[string]]::new()
     $excludeSet = [System.Collections.Generic.HashSet[string]]::new(
         [string[]]@($ExcludeCommands | ForEach-Object { $_.Trim() }),
