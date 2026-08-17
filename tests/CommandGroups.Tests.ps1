@@ -200,6 +200,76 @@ Describe 'Profile/catalog consistency (typo guard)' {
     }
 }
 
+Describe 'collector-only category — protected, non-removable, reserved' {
+    # Synthetic catalog exercising the reserved 'collector-only' slot. Real
+    # platform catalogs deliberately define NO collector-only members yet (asserted
+    # below), so behavior is proven against a synthetic entry, mirroring how the
+    # version-guard archetype is tested.
+    BeforeAll {
+        $script:synthCat = @{
+            'test-plat' = [ordered]@{
+                'base'           = @('show version', 'show running-config')
+                'collector-only' = @('show collector-internal')
+                'neighbors'      = @('show cdp neighbors')
+                'extras'         = @('show extra')
+            }
+        }
+        $script:synthProfiles = @{
+            'full'   = '*'
+            'narrow' = @('neighbors')
+        }
+    }
+
+    It 'always includes collector-only commands under the full profile' {
+        $r = Resolve-ProfileCommandList -Platform 'test-plat' -ProfileName 'full' `
+            -Catalog $script:synthCat -ProfileCatalog $script:synthProfiles
+        $r | Should -Contain 'show collector-internal'
+    }
+
+    It 'includes collector-only even for a narrow profile that names only one feature group' {
+        $r = Resolve-ProfileCommandList -Platform 'test-plat' -ProfileName 'narrow' `
+            -Catalog $script:synthCat -ProfileCatalog $script:synthProfiles
+        $r | Should -Contain 'show collector-internal'   # protected, not profile-selected
+        $r | Should -Contain 'show cdp neighbors'        # the one selected feature group
+        $r | Should -Not -Contain 'show extra'           # unselected feature group is absent
+    }
+
+    It 'includes collector-only even when only an unrelated explicit group is requested' {
+        $r = Resolve-ProfileCommandList -Platform 'test-plat' -Groups @('neighbors') `
+            -Catalog $script:synthCat -ProfileCatalog $script:synthProfiles
+        $r | Should -Contain 'show collector-internal'
+    }
+
+    It 'refuses to drop a collector-only command via exclude_commands' {
+        $r = Resolve-ProfileCommandList -Platform 'test-plat' -ProfileName 'full' `
+            -ExcludeCommands @('show collector-internal') `
+            -Catalog $script:synthCat -ProfileCatalog $script:synthProfiles
+        $r | Should -Contain 'show collector-internal'
+    }
+
+    It 'emits collector-only after base, ahead of feature groups' {
+        $r = Resolve-ProfileCommandList -Platform 'test-plat' -ProfileName 'full' `
+            -Catalog $script:synthCat -ProfileCatalog $script:synthProfiles
+        $baseIdx      = [array]::IndexOf($r, 'show running-config')
+        $collectorIdx = [array]::IndexOf($r, 'show collector-internal')
+        $featureIdx   = [array]::IndexOf($r, 'show cdp neighbors')
+        $collectorIdx | Should -BeGreaterThan $baseIdx
+        $featureIdx   | Should -BeGreaterThan $collectorIdx
+    }
+
+    It 'is RESERVED — no real platform catalog defines collector-only members yet' {
+        $cat = Get-CommandGroupCatalog
+        foreach ($plat in $cat.Keys) {
+            # collector-only is either absent or (if ever pre-declared) empty; it must
+            # NOT carry members until a real collector-operational command needs one.
+            if ($cat[$plat].Contains('collector-only')) {
+                @($cat[$plat]['collector-only']).Count | Should -Be 0 `
+                    -Because "$plat must keep collector-only reserved/empty for now"
+            }
+        }
+    }
+}
+
 Describe 'Base tightening — deliberate extras re-homed OUT of base' {
     BeforeAll { $script:cat = Get-CommandGroupCatalog }
 

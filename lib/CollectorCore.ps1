@@ -413,9 +413,22 @@ function ConvertFrom-CollectionCsv {
 # group list) resolves to its command set. This replaces the flat, per-OS
 # commands/<os>.txt files as the source of truth for *what a profile collects*.
 #
-# The 'base' group is NON-REMOVABLE: identity commands, running-config, and the
-# per-platform sentinel are always collected and cannot be dropped by a profile
-# choice or an exclude. Enforced in Resolve-ProfileCommandList.
+# Two group names are PROTECTED (always collected, NON-REMOVABLE — an exclude
+# naming one of their commands is ignored), for DIFFERENT reasons:
+#   'base'           — identity commands, running-config, and the per-platform
+#                      sentinel: what REPERIO needs to process/key the device.
+#   'collector-only' — commands the COLLECTOR itself needs to operate. These are
+#                      collector-INTERNAL: they must NEVER be surfaced to operators
+#                      as tunable/collectable data (deliberately absent from any
+#                      platformCommands/Help mirror AND from COMMAND_MAP — the
+#                      THIRD legitimate sync-triangle divergence class, alongside
+#                      collect-only-forward and parse-only-backward). This is
+#                      distinct from 'collect-only-ops', which IS operator-facing
+#                      informative data (safe to prune). 'collector-only' is
+#                      RESERVED — currently no platform defines members for it; the
+#                      slot + semantics ship now so a future collector-operational
+#                      command has a home a profile choice or exclude cannot drop.
+# Both are enforced in Resolve-ProfileCommandList.
 #
 # Forward-compat (task 0c): a group member is a plain string today. A later
 # catalog may make it an object { command; min_version; max_version } and the
@@ -807,8 +820,11 @@ function Resolve-CommandVariant {
 
 # Resolve a device's effective command list from its platform + (profile OR
 # explicit groups) + per-device excludes/adds.
-#   - base commands always come first and are NON-REMOVABLE (an exclude naming a
-#     base command is ignored);
+#   - PROTECTED groups ('base', then 'collector-only') always come first, in that
+#     order, and are NON-REMOVABLE (an exclude naming one of their commands is
+#     ignored). 'base' = what Reperio needs to key the device; 'collector-only' =
+#     what the collector needs operationally (collector-internal; reserved/empty
+#     today). Both are always included regardless of the profile/group selection;
 #   - selected feature groups follow in the catalog's declared group order;
 #   - commands are deduped case-insensitively (first occurrence wins);
 #   - excludes/adds are then applied via the shared Resolve-DeviceCommandList.
@@ -843,8 +859,14 @@ function Resolve-ProfileCommandList {
     }
     $platGroups = $Catalog[$Platform]
 
-    # Non-base group names this platform defines (canonical order preserved).
-    $featureNames = @($platGroups.Keys | Where-Object { $_ -ne 'base' })
+    # PROTECTED group names are always collected and NON-REMOVABLE, emitted first
+    # in THIS order (base, then collector-only). See the section header for why the
+    # two differ. Feature groups are everything else.
+    $protectedGroupNames = @('base', 'collector-only')
+
+    # Feature (profile-selectable) group names this platform defines — everything
+    # that is not protected (canonical catalog order preserved).
+    $featureNames = @($platGroups.Keys | Where-Object { $protectedGroupNames -notcontains $_ })
 
     # Determine the selected feature-group list.
     if ($Groups.Count -gt 0) {
@@ -881,17 +903,19 @@ function Resolve-ProfileCommandList {
     $ordered = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    $baseCmds = @()
-    if ($platGroups.Contains('base')) { $baseCmds = @($platGroups['base']) }
-
-    # Resolve the base literals once — reused for both the ordered set and the
-    # non-removable base guard below.
-    $resolvedBase = [System.Collections.Generic.List[string]]::new()
-    foreach ($member in $baseCmds) {
-        $cmd = & $resolveMember $member
-        if ($null -ne $cmd) { $resolvedBase.Add($cmd) }
+    # Resolve the protected literals once (base, then collector-only) — reused for
+    # both the ordered set and the non-removable guard below. collector-only is
+    # reserved (no platform defines it yet), so the inner loop is a no-op today but
+    # correct the moment a member is added.
+    $resolvedProtected = [System.Collections.Generic.List[string]]::new()
+    foreach ($pName in $protectedGroupNames) {
+        if (-not $platGroups.Contains($pName)) { continue }
+        foreach ($member in @($platGroups[$pName])) {
+            $cmd = & $resolveMember $member
+            if ($null -ne $cmd) { $resolvedProtected.Add($cmd) }
+        }
     }
-    foreach ($c in $resolvedBase) {
+    foreach ($c in $resolvedProtected) {
         if ($seen.Add($c.Trim())) { $ordered.Add($c) }
     }
     foreach ($gName in $featureNames) {
@@ -903,12 +927,13 @@ function Resolve-ProfileCommandList {
         }
     }
 
-    # base is NON-REMOVABLE: drop any exclude that targets a base command before
-    # applying the shared exclude/add resolver.
-    $baseSet = [System.Collections.Generic.HashSet[string]]::new(
-        [string[]]@($resolvedBase | ForEach-Object { $_.Trim() }),
+    # Protected groups (base + collector-only) are NON-REMOVABLE: drop any exclude
+    # that targets one of their commands before applying the shared exclude/add
+    # resolver.
+    $protectedSet = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@($resolvedProtected | ForEach-Object { $_.Trim() }),
         [System.StringComparer]::OrdinalIgnoreCase)
-    $effectiveExcludes = @($ExcludeCommands | Where-Object { -not $baseSet.Contains(([string]$_).Trim()) })
+    $effectiveExcludes = @($ExcludeCommands | Where-Object { -not $protectedSet.Contains(([string]$_).Trim()) })
 
     return Resolve-DeviceCommandList -BaseCommands ([string[]]$ordered.ToArray()) `
         -ExcludeCommands $effectiveExcludes -AddCommands $AddCommands
