@@ -47,7 +47,7 @@ Provides plan-wide fallbacks. A device-level field always wins over the default.
 | `platform`         | string        | no       | One of the collector's known OS types (`cisco-switch-iosxe`, `cisco-router-iosxe`, `cisco-router-iosxr`, `cisco-switch-nxos`, `cisco-wlc-aireos`, `cisco-wlc-iosxe`). Optional here so a plan can defer platform detection, but required before command resolution. |
 | `profile`          | string        | no*      | Named command **profile** (`full`, `l2-switch`, `l3-switch`, `router`, `bgp-heavy`, `wlc`). Resolves to a command set via the group catalog. |
 | `groups`           | string[]      | no*      | Explicit feature-group list. **When present and non-empty, it takes precedence over `profile`.** |
-| `exclude_commands` | string[]      | no       | Commands to drop from the resolved set. **Base commands can never be excluded** (see "Non-removable base"). |
+| `exclude_commands` | string[]      | no       | Commands to drop from the resolved set. **Protected (`base` / `collector-only`) commands can never be excluded** (see "Protected (non-removable) groups"). |
 | `add_commands`     | string[]      | no       | Extra commands appended after the resolved set (deduped). |
 | `ssh_options`      | object        | no       | Per-device SSH tuning (see below). |
 | `priority`         | integer       | no       | Optional ordering hint (lower = earlier). Non-integer is a hard error. |
@@ -95,13 +95,53 @@ host_key_algorithms: null, pty: true }`.
 
 ---
 
-## Non-removable base
+## Protected (non-removable) groups: `base` and `collector-only`
 
-Every platform's `base` group (identity commands, `show running-config`, and the
-per-platform sentinel) is **always collected** and **cannot be removed** by a
-profile choice or an `exclude_commands` entry. An exclude that names a base
-command is silently ignored (the base command still runs). This guarantees every
-bundle carries the minimum Reperio needs to key a device.
+Two group names are **protected**: they are **always collected** and **cannot be
+removed** by a profile choice or an `exclude_commands` entry. An exclude that
+names one of their commands is silently ignored (the command still runs). They
+are emitted first, in this order — `base`, then `collector-only` — ahead of the
+selected feature groups. They are protected for **different reasons**:
+
+| Group            | Reason it is protected | Operator-facing? |
+|------------------|------------------------|------------------|
+| `base`           | Identity commands, `show running-config`, and the per-platform sentinel — the minimum **Reperio** needs to key/process a device. | Yes — documented in the Help card and parsed by `COMMAND_MAP`. |
+| `collector-only` | Commands the **collector itself** needs to operate. **Collector-internal** — never surfaced to operators as tunable/collectable data. | No — deliberately absent from BOTH the Help card AND `COMMAND_MAP`. |
+
+`collector-only` is **RESERVED — currently empty**: no platform catalog defines a
+member for it yet. The slot and its semantics ship now so that a future
+collector-operational command has a home a profile choice or an `exclude` cannot
+drop, and so it is unambiguously distinguished from `collect-only-ops` (below).
+
+> **`collector-only` vs `collect-only-ops` — do not confuse them.**
+> `collect-only-ops` is a normal, profile-selectable feature group holding
+> **operator-facing informative** data (e.g. `show logging`, `show license all`):
+> it reads as "safe to prune / operator-tunable" and pruning one only loses
+> optional context. `collector-only` is the opposite: **collector-internal**,
+> non-removable, and never advertised to operators — pruning one (if it could be
+> pruned) would break collection itself.
+
+### Sync-triangle placement (third divergence class)
+
+The command-set **sync triangle** relates three collect/parse surfaces:
+
+- `commands/*.txt` catalog (this repo) — what the collector **runs**;
+- `platformCommands` in Reperio's `helpContent.ts` — what operators are **told**
+  to collect;
+- `COMMAND_MAP` in Reperio's `command_map.py` — what Reperio **parses**.
+
+The triangle is **not** a flat 3-way mirror. Three legitimate divergence classes
+exist; `collector-only` is the third:
+
+1. **collect-only-forward** — in the collector (and the Help card's collect-only
+   group) but not yet in `COMMAND_MAP` (no parser wired yet).
+2. **parse-only-backward** — in `COMMAND_MAP` but intentionally **not** run by the
+   collector (legacy/pre-split or wrong-syntax-for-this-platform parse-dispatch
+   entries, e.g. the IOS-vs-NX-OS `show ip route vrf all` class).
+3. **collector-only** — run by the collector (present in the group catalog) but
+   intentionally absent from **BOTH** `platformCommands`/Help **AND**
+   `COMMAND_MAP`, because it is collector-internal. Any member added to a
+   `collector-only` group must **not** be mirrored into either Reperio surface.
 
 ---
 
