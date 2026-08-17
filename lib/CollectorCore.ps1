@@ -913,3 +913,90 @@ function Resolve-ProfileCommandList {
     return Resolve-DeviceCommandList -BaseCommands ([string[]]$ordered.ToArray()) `
         -ExcludeCommands $effectiveExcludes -AddCommands $AddCommands
 }
+
+# =============================================================================
+# COLLECTION SUMMARY v2 (task 0d)
+# schema_version 2 adds, per device: a remediation-oriented `failure_category`,
+# the captured working `connection` params, and per-command `duration`; and, at
+# the top level, an echo of the input `plan_id`. These pure helpers own the parts
+# that must be deterministic and unit-tested (the classifier and the top-level
+# document shape); the per-command/connection instrumentation is gathered in
+# ssh-cmd-runner.ps1's collection loop and passed in.
+#
+# The `failure_category` classifier is the REFERENCE mapping — Reperio's Phase-3
+# v2-summary parser (follow-up C2) reuses it as the canonical set, with a v1
+# free-text fallback for older bundles.
+# =============================================================================
+
+# Map a device's collection outcome (status + auth flag + free-text reason) to a
+# stable, remediation-oriented failure category, or $null when there is nothing
+# to remediate (Success / Warning — a Warning is a usable partial bundle). Pure
+# and deterministic. Categories:
+#   auth_failed | ssh_negotiation_failed | unreachable_ping |
+#   command_timeout | connection_refused | cancelled
+# An unrecognized failure returns $null so the caller keeps the free-text reason.
+function Get-FailureCategory {
+    param(
+        [string]$Status,
+        [bool]$AuthFailed = $false,
+        [string]$ErrorText = ''
+    )
+    # A completed run (full or partial) is not a device-level failure.
+    if ($Status -eq 'Success' -or $Status -eq 'Warning') { return $null }
+
+    # Operator-initiated cancellation outranks any error text.
+    if ($Status -eq 'Cancelled') { return 'cancelled' }
+
+    $err = if ($null -eq $ErrorText) { '' } else { $ErrorText }
+
+    # Credential rejection — the collector's own auth detector wins, then text.
+    if ($AuthFailed) { return 'auth_failed' }
+    if ($err -match 'Permission denied|Authentication failed|Too many authentication failures') {
+        return 'auth_failed'
+    }
+
+    # Pre-SSH ICMP skip is always an unreachable host.
+    if ($Status -eq 'Skipped') { return 'unreachable_ping' }
+
+    # TCP-level refusal.
+    if ($err -match 'Connection refused') { return 'connection_refused' }
+
+    # SSH transport negotiation (crypto/host-key mismatch) — legacy-gear signal.
+    if ($err -match 'no matching (key exchange method|cipher|MAC|host key type)|Unable to negotiate|kex_exchange_identification') {
+        return 'ssh_negotiation_failed'
+    }
+
+    # Connect-level unreachability (checked BEFORE the generic timeout below so a
+    # TCP "Connection timed out" is not misfiled as a command timeout).
+    if ($err -match 'No route to host|Network is unreachable|connect to host.*(Connection|Operation) timed out|Host is down') {
+        return 'unreachable_ping'
+    }
+
+    # Device-side / prompt-level command timeout.
+    if ($err -match 'Commands timed out during processing|Timed out waiting for device prompt|Command timed out|timed out') {
+        return 'command_timeout'
+    }
+
+    # Unclassified failure — keep the free-text reason, no forced category.
+    return $null
+}
+
+# Build the top-level v2 collection-summary document. Pure: assembles the ordered
+# shape and echoes `plan_id` from the input plan (the load-bearing round-trip
+# contract). The caller supplies the already-merged device map and totals.
+function New-CollectionSummaryDocument {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$DevicesMap,
+        [Parameter(Mandatory = $true)]$Totals,
+        [string]$PlanId,
+        [string]$Generated
+    )
+    return [ordered]@{
+        schema_version = 2
+        plan_id        = if ([string]::IsNullOrWhiteSpace($PlanId)) { $null } else { $PlanId.Trim() }
+        generated      = $Generated
+        totals         = $Totals
+        devices        = $DevicesMap
+    }
+}

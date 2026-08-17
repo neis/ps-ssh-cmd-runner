@@ -1249,6 +1249,7 @@ function Invoke-SSHSession {
         Duration       = [TimeSpan]::Zero
         Timestamp      = ""   # completion timestamp, set in finally block
         CommandResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+        Connection     = $null   # (task 0d) captured working connection params, set on success
     }
 
     # Commands whose output stalled past the inactivity timeout. A non-empty list
@@ -1594,6 +1595,11 @@ function Invoke-SSHSession {
                     }
                 }
 
+                # (task 0d) Per-command wall-clock start. Additive timestamp only —
+                # measures send -> prompt-complete for the summary's per-command
+                # `duration`; does not touch the reader runspace or prompt timing.
+                $cmdStartTime = [DateTime]::UtcNow
+
                 $proc.StandardInput.WriteLine($cmd)
                 $proc.StandardInput.Flush()
 
@@ -1669,6 +1675,7 @@ function Invoke-SSHSession {
                                 command    = $cmd
                                 prompt     = $cmdPrompt
                                 status     = "timedout"
+                                duration   = [math]::Round(([DateTime]::UtcNow - $cmdStartTime).TotalSeconds, 2)
                                 raw_output = [string[]]@("Command timed out during processing")
                             })
 
@@ -1728,6 +1735,7 @@ function Invoke-SSHSession {
                         command    = $cmd
                         prompt     = $cmdPrompt
                         status     = "successful"
+                        duration   = [math]::Round(([DateTime]::UtcNow - $cmdStartTime).TotalSeconds, 2)
                         raw_output = [string[]]$rawLines
                     })
 
@@ -1861,6 +1869,17 @@ function Invoke-SSHSession {
 
             if ($LogOutputEnabled) {
                 Set-Content -Path $logFilePath -Value ($logLines -join "`r`n") -Encoding UTF8
+            }
+
+            # (task 0d) Capture the connection params that actually worked, straight
+            # from values the loop already produced: the address SSHed to, the extra
+            # SSH options passed, and the PTY-retry outcome ($ptyAttempt > 0 means the
+            # first -T attempt failed and we retried with -tt).
+            $result.Connection = [ordered]@{
+                connect_ip    = $IPAddress
+                ssh_options   = @($SSHOptions)
+                pty_allocated = $usePTY
+                pty_retried   = ($ptyAttempt -gt 0)
             }
 
             break   # Success — exit the PTY retry loop
@@ -2199,6 +2218,12 @@ function Write-DeviceResult {
         }
     }
 }
+
+# (task 0d) Input plan identity, echoed to the v2 collection summary (round-trip
+# contract). The structured JSON-plan input path populates this from the plan's
+# top-level `plan_id`; it stays $null on the legacy CSV path. Declared here as the
+# single wiring seam for the future JSON-plan input slice.
+$script:CollectionPlanId = $null
 
 # Pre-build lookup maps for per-device output (used by Write-DeviceOutputFiles)
 # $deviceByIp gives the collection-summary builder access to each device's
@@ -2792,34 +2817,51 @@ if ($CollectionSummaryEnabled) {
         $dev = $deviceByIp[$ip]
 
         # Per-command status list, ordered by the device's resolved command list.
-        # Commands present in CommandResults carry their real status (successful/timedout);
-        # commands in the intended list but never reached are 'notrun'.
+        # Commands present in CommandResults carry their real status (successful/timedout)
+        # and their measured duration; commands in the intended list but never reached
+        # are 'notrun' with a null duration.
         $cmdStatus = @{}
+        $cmdDuration = @{}
         foreach ($cr in $r.CommandResults) {
             $st = if ($cr.PSObject.Properties.Name -contains 'status' -and $cr.status) { $cr.status } else { 'successful' }
             $cmdStatus[$cr.command] = $st
+            if ($cr.PSObject.Properties.Name -contains 'duration') {
+                $cmdDuration[$cr.command] = $cr.duration
+            }
         }
         $basis = if ($dev -and $dev.ResolvedCommands) { @($dev.ResolvedCommands) } else { @($r.CommandResults | ForEach-Object { $_.command }) }
         $commandList = @(
             foreach ($c in $basis) {
                 [ordered]@{
-                    command = $c
-                    status  = if ($cmdStatus.ContainsKey($c)) { $cmdStatus[$c] } else { 'notrun' }
+                    command  = $c
+                    status   = if ($cmdStatus.ContainsKey($c)) { $cmdStatus[$c] } else { 'notrun' }
+                    duration = if ($cmdDuration.ContainsKey($c)) { $cmdDuration[$c] } else { $null }
                 }
             }
         )
 
         $jsonFile = if ($r.PSObject.Properties.Name -contains 'JsonFile' -and $r.JsonFile) { $r.JsonFile } else { $null }
 
+        # (task 0d) Deterministic remediation category from the collector's own
+        # signals (status + auth flag + reason). $null for Success/Warning.
+        $authFailedFlag = [bool](if ($r.PSObject.Properties.Name -contains 'AuthFailed') { $r.AuthFailed } else { $false })
+        $failureCategory = Get-FailureCategory -Status $r.Status -AuthFailed $authFailedFlag -ErrorText $r.Error
+
+        # (task 0d) Captured working connection params, present only on a successful
+        # session (skip/cancel results never established one).
+        $connection = if ($r.PSObject.Properties.Name -contains 'Connection') { $r.Connection } else { $null }
+
         $entry = [ordered]@{
             category          = if ($dev) { $dev.Category } else { $deviceCategoryMap[$ip] }
             os                = if ($dev) { $dev.OS } else { $deviceOSMap[$ip] }
             hostname          = $r.DeviceName
             status            = $r.Status
+            failure_category  = $failureCategory
             duration_seconds  = [math]::Round($r.Duration.TotalSeconds, 2)
             reason            = $r.Error
             run_timestamp     = $r.Timestamp
             json_file         = $jsonFile
+            connection        = $connection
             commands          = $commandList
             excluded_commands = @(if ($dev) { $dev.ExcludeCommands } else { @() })
             added_commands    = @(if ($dev) { $dev.AddCommands } else { @() })
@@ -2848,12 +2890,18 @@ if ($CollectionSummaryEnabled) {
         }
     }
 
-    $summaryDoc = [ordered]@{
-        schema_version = 1
-        generated      = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        totals         = $tally
-        devices        = $devicesMap
+    # (task 0d) v2 document via the pure builder, echoing the input plan_id
+    # (round-trip contract). $CollectionPlanId is populated by the JSON-plan input
+    # path (wired in a later slice); it is $null for the legacy CSV path today.
+    $planIdForSummary = if (Get-Variable -Name 'CollectionPlanId' -Scope Script -ErrorAction SilentlyContinue) {
+        $script:CollectionPlanId
     }
+    else { $null }
+    $summaryDoc = New-CollectionSummaryDocument `
+        -DevicesMap $devicesMap `
+        -Totals $tally `
+        -PlanId ([string]$planIdForSummary) `
+        -Generated (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     try {
         $summaryDoc | ConvertTo-Json -Depth 20 | Set-Content -Path $summaryPath -Encoding UTF8
         Write-Verbose "Collection summary written to $summaryPath ($($tally.total) device(s))."
