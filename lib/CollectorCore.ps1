@@ -535,6 +535,276 @@ function Get-CollectionProfileCatalog {
     }
 }
 
+# =============================================================================
+# VERSION-GUARDED COMMAND VARIANTS (task 0c)
+# A group member is a plain string today (unversioned, always collected). It MAY
+# instead be a version-guarded object so a logical command whose CLI syntax
+# changed across a firmware boundary resolves to the correct literal for the
+# device's detected version. Two accepted object shapes:
+#
+#   (a) multi-variant:  @{ variants = @(
+#                              @{ command = 'show foo old'; max_version = '17.1' },
+#                              @{ command = 'show foo new'; min_version = '17.2' }
+#                            ); on_unknown = 'newest' }   # or 'skip'
+#   (b) single-variant convenience: @{ command = '...'; min_version; max_version }
+#
+# Resolution rules (see Resolve-CommandVariant):
+#   - a plain string resolves to itself;
+#   - with a known, parseable device version, the variant whose [min,max] range
+#     contains it wins (newest match on overlap);
+#   - with an UNKNOWN/unparseable version, the default is the NEWEST variant (and
+#     a note is emitted); a per-command opt-out `on_unknown = 'skip'` hard-skips
+#     instead (for commands where guessing wrong is harmful).
+#
+# All logic here is pure and unit-tested; the resolver never writes/logs — it
+# RETURNS a note string that the caller surfaces. Actual per-command variants are
+# DATA added to the catalog as discovered; the mechanism ships now, the archetype
+# (IOS-XE syntax change at 17.2) is exercised in the tests with a synthetic entry.
+# =============================================================================
+
+# Read a field off a variant member that may be a hashtable (catalog style) OR a
+# PSCustomObject (JSON-authored). Returns $Default when absent/null. Strict-safe.
+function Get-VariantField {
+    param(
+        $Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Default = $null
+    )
+    if ($null -eq $Object) { return $Default }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name) -and $null -ne $Object[$Name]) { return $Object[$Name] }
+        return $Default
+    }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop -or $null -eq $prop.Value) { return $Default }
+    return $prop.Value
+}
+
+# Tokenize a vendor version string into an ordered integer component array plus an
+# optional trailing alpha suffix (rebuild/maintenance letter). Handles every
+# current Cisco scheme: IOS-XE '17.2.1a' / '17.03.04a', NX-OS '9.3(5)',
+# IOS-XR '7.3.2', AireOS '8.10.185.0'. Returns $null when no numeric component
+# is present (unparseable). Leading train names (e.g. 'Amsterdam-17.2') are
+# ignored because only numeric runs and a trailing letter are extracted.
+function ConvertTo-VersionTokens {
+    param([string]$Version)
+    if ([string]::IsNullOrWhiteSpace($Version)) { return $null }
+    $numMatches = [regex]::Matches($Version, '\d+')
+    if ($numMatches.Count -eq 0) { return $null }
+    $numbers = @()
+    foreach ($m in $numMatches) { $numbers += [int]$m.Value }
+    $suffix = ''
+    $suffixMatch = [regex]::Match($Version, '([A-Za-z]+)\s*$')
+    if ($suffixMatch.Success) { $suffix = $suffixMatch.Groups[1].Value.ToLower() }
+    return [PSCustomObject]@{ Numbers = [int[]]$numbers; Suffix = $suffix }
+}
+
+# Compare two firmware versions for a platform. Returns -1 (A<B), 0 (A==B),
+# 1 (A>B), or $null when either side is unparseable. The $Platform parameter is
+# the documented per-scheme dispatch point: all current vendor schemes tokenize
+# identically (numeric components, then a trailing rebuild letter where ''<'a'),
+# so they share one tokenizer today, but a future divergent scheme branches here.
+function Compare-FirmwareVersion {
+    param(
+        [string]$Platform,
+        [string]$VersionA,
+        [string]$VersionB
+    )
+    $ta = $null
+    $tb = $null
+    switch -Regex ($Platform) {
+        # Reserved for a future scheme that does NOT tokenize like the others.
+        default {
+            $ta = ConvertTo-VersionTokens $VersionA
+            $tb = ConvertTo-VersionTokens $VersionB
+        }
+    }
+    if ($null -eq $ta -or $null -eq $tb) { return $null }
+
+    $maxLen = [Math]::Max($ta.Numbers.Count, $tb.Numbers.Count)
+    for ($i = 0; $i -lt $maxLen; $i++) {
+        $x = if ($i -lt $ta.Numbers.Count) { $ta.Numbers[$i] } else { 0 }
+        $y = if ($i -lt $tb.Numbers.Count) { $tb.Numbers[$i] } else { 0 }
+        if ($x -lt $y) { return -1 }
+        if ($x -gt $y) { return 1 }
+    }
+    # Numeric components equal — an empty suffix is OLDER than any lettered rebuild.
+    if ($ta.Suffix -eq $tb.Suffix) { return 0 }
+    if ($ta.Suffix -eq '') { return -1 }
+    if ($tb.Suffix -eq '') { return 1 }
+    if ([string]::CompareOrdinal($ta.Suffix, $tb.Suffix) -lt 0) { return -1 }
+    return 1
+}
+
+# Extract a device's firmware version from its 'show version' (or identity)
+# output, per platform. Returns the version literal (e.g. '17.3.4a', '9.3(5)',
+# '7.3.2', '8.10.185.0') or $null when it cannot be found.
+function Get-DeviceFirmwareVersion {
+    param(
+        [string]$Platform,
+        [string]$ShowVersionOutput
+    )
+    if ([string]::IsNullOrWhiteSpace($ShowVersionOutput)) { return $null }
+    switch -Regex ($Platform) {
+        'nxos' {
+            # "  NXOS: version 9.3(5)"  or  "  system:    version 9.3(5)"
+            $m = [regex]::Match($ShowVersionOutput, '(?im)^\s*(?:NXOS|system):\s+version\s+(\S+)')
+            if ($m.Success) { return $m.Groups[1].Value }
+            return $null
+        }
+        'iosxr' {
+            # "Cisco IOS XR Software, Version 7.3.2"
+            $m = [regex]::Match($ShowVersionOutput, '(?im)IOS\s*XR\s+Software.*?Version\s+([0-9][0-9A-Za-z.]*)')
+            if ($m.Success) { return $m.Groups[1].Value.TrimEnd('.', ',') }
+            $m2 = [regex]::Match($ShowVersionOutput, '(?im)^\s*Version\s+(\d+\.\d+\.\d+)')
+            if ($m2.Success) { return $m2.Groups[1].Value }
+            return $null
+        }
+        'aireos' {
+            # AireOS 'show sysinfo': "Product Version..... 8.10.185.0"
+            $m = [regex]::Match($ShowVersionOutput, '(?im)Product\s+Version[\.\s]+([0-9][0-9A-Za-z.]*)')
+            if ($m.Success) { return $m.Groups[1].Value.TrimEnd('.', ',') }
+            return $null
+        }
+        default {
+            # IOS-XE (switch/router/wlc-iosxe): "Cisco IOS XE Software, Version 17.03.04a"
+            # or "Cisco IOS Software [Amsterdam], ... Version 17.2.1a"
+            $m = [regex]::Match($ShowVersionOutput, '(?im)Cisco\s+IOS.*?Version\s+([0-9][0-9A-Za-z.()]*)')
+            if ($m.Success) { return $m.Groups[1].Value.TrimEnd('.', ',') }
+            return $null
+        }
+    }
+}
+
+# True when $Version satisfies a variant's [min_version, max_version] guard for a
+# platform (absent bound = open). A bound that fails to compare (unparseable) is
+# treated as NOT satisfied — conservative, since guard data should be well-formed.
+function Test-VariantGuard {
+    param(
+        $Variant,
+        [string]$Platform,
+        [string]$Version
+    )
+    $min = [string](Get-VariantField $Variant 'min_version')
+    $max = [string](Get-VariantField $Variant 'max_version')
+    if ($min -ne '') {
+        $c = Compare-FirmwareVersion -Platform $Platform -VersionA $Version -VersionB $min
+        if ($null -eq $c -or $c -lt 0) { return $false }
+    }
+    if ($max -ne '') {
+        $c = Compare-FirmwareVersion -Platform $Platform -VersionA $Version -VersionB $max
+        if ($null -eq $c -or $c -gt 0) { return $false }
+    }
+    return $true
+}
+
+# Order two variants by recency (newer = intended for later firmware). Returns
+# 1 when $A is newer than $B, -1 when older, 0 when indistinguishable. A variant
+# WITH a min_version outranks one without (open-bottom = oldest); when both have
+# min_version they compare by it; ties fall through to max_version where an ABSENT
+# max (open-top = latest) is the newer.
+function Compare-VariantRecency {
+    param($A, $B, [string]$Platform)
+    $aMin = [string](Get-VariantField $A 'min_version')
+    $bMin = [string](Get-VariantField $B 'min_version')
+    if ($aMin -ne '' -and $bMin -ne '') {
+        $c = Compare-FirmwareVersion -Platform $Platform -VersionA $aMin -VersionB $bMin
+        if ($null -ne $c -and $c -ne 0) { return $c }
+    }
+    elseif ($aMin -ne '' -and $bMin -eq '') { return 1 }
+    elseif ($aMin -eq '' -and $bMin -ne '') { return -1 }
+
+    $aMax = [string](Get-VariantField $A 'max_version')
+    $bMax = [string](Get-VariantField $B 'max_version')
+    if ($aMax -eq '' -and $bMax -ne '') { return 1 }
+    if ($aMax -ne '' -and $bMax -eq '') { return -1 }
+    if ($aMax -ne '' -and $bMax -ne '') {
+        $c = Compare-FirmwareVersion -Platform $Platform -VersionA $aMax -VersionB $bMax
+        if ($null -ne $c) { return $c }
+    }
+    return 0
+}
+
+# The newest variant in a set (see Compare-VariantRecency).
+function Get-NewestVariant {
+    param($Variants, [string]$Platform)
+    $arr = @($Variants)
+    $newest = $arr[0]
+    for ($i = 1; $i -lt $arr.Count; $i++) {
+        if ((Compare-VariantRecency -A $arr[$i] -B $newest -Platform $Platform) -gt 0) {
+            $newest = $arr[$i]
+        }
+    }
+    return $newest
+}
+
+# Resolve a single group MEMBER (string or version-guarded object) to a literal
+# command for a device's detected firmware version. Returns a PSCustomObject
+# @{ command = <string or $null>; note = <string or $null> } where a $null command
+# means "hard-skip this command" and a non-null note is a diagnostic the caller
+# should log. Pure: no side effects, no logging.
+function Resolve-CommandVariant {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)]$Member,
+        [string]$DeviceVersion
+    )
+    # A plain string is an unversioned command — always collected verbatim.
+    if ($Member -is [string]) {
+        return [PSCustomObject]@{ command = $Member; note = $null }
+    }
+
+    # Object member. Gather its variants: either an explicit 'variants' array, or
+    # the member itself as a single-variant convenience form.
+    $variantsRaw = Get-VariantField $Member 'variants'
+    $onUnknown = ([string](Get-VariantField $Member 'on_unknown' 'newest')).Trim().ToLower()
+    if ($null -eq $variantsRaw) { $variantsRaw = @($Member) }
+    $variants = @($variantsRaw)
+    if ($variants.Count -eq 0) {
+        return [PSCustomObject]@{ command = $null; note = $null }
+    }
+
+    $newest = Get-NewestVariant -Variants $variants -Platform $Platform
+    $newestCmd = [string](Get-VariantField $newest 'command')
+
+    # If no variant actually carries a version guard, the member is unconditional.
+    $guarded = @($variants | Where-Object {
+            (([string](Get-VariantField $_ 'min_version')) -ne '') -or
+            (([string](Get-VariantField $_ 'max_version')) -ne '')
+        })
+    if ($guarded.Count -eq 0) {
+        return [PSCustomObject]@{ command = $newestCmd; note = $null }
+    }
+
+    # Unknown / unparseable device version: newest (default) or hard-skip (opt-out).
+    if ([string]::IsNullOrWhiteSpace($DeviceVersion) -or $null -eq (ConvertTo-VersionTokens $DeviceVersion)) {
+        if ($onUnknown -eq 'skip') {
+            return [PSCustomObject]@{
+                command = $null
+                note    = "Device version unknown/unparseable; hard-skipped version-guarded command '$newestCmd' (on_unknown=skip)."
+            }
+        }
+        return [PSCustomObject]@{
+            command = $newestCmd
+            note    = "Device version unknown/unparseable; defaulted to newest variant '$newestCmd'."
+        }
+    }
+
+    # Known version: pick the newest variant whose guard the version satisfies.
+    $matched = @($variants | Where-Object { Test-VariantGuard -Variant $_ -Platform $Platform -Version $DeviceVersion })
+    if ($matched.Count -ge 1) {
+        $pick = Get-NewestVariant -Variants $matched -Platform $Platform
+        return [PSCustomObject]@{ command = [string](Get-VariantField $pick 'command'); note = $null }
+    }
+
+    # Known version but outside every declared range — data gap; use newest + note.
+    return [PSCustomObject]@{
+        command = $newestCmd
+        note    = "Device version '$DeviceVersion' matched no variant range; defaulted to newest '$newestCmd'."
+    }
+}
+
 # Resolve a device's effective command list from its platform + (profile OR
 # explicit groups) + per-device excludes/adds.
 #   - base commands always come first and are NON-REMOVABLE (an exclude naming a
@@ -553,7 +823,14 @@ function Resolve-ProfileCommandList {
         [string[]]$ExcludeCommands = @(),
         [string[]]$AddCommands = @(),
         $Catalog = $null,
-        $ProfileCatalog = $null
+        $ProfileCatalog = $null,
+        # Task 0c: the device's detected firmware version. When a catalog member is
+        # a version-guarded variant, this selects the literal. $null/empty means
+        # "unknown version" (newest-or-skip per the member's on_unknown policy).
+        [string]$DeviceVersion,
+        # Optional List[string] the resolver appends version-resolution notes to
+        # (fallbacks / hard-skips) so the caller can log them. Left $null to ignore.
+        $VersionNotes = $null
     )
     if ($null -eq $Catalog) { $Catalog = Get-CommandGroupCatalog }
     if ($null -eq $ProfileCatalog) { $ProfileCatalog = Get-CollectionProfileCatalog }
@@ -590,26 +867,46 @@ function Resolve-ProfileCommandList {
         $selected = @($featureNames | Where-Object { $_ -ne 'routing-tables-lite' })
     }
 
-    # Build base + selected-group commands in canonical order, deduped.
+    # Local helper: route a raw catalog member through the version-guard resolver,
+    # collecting any note. Returns the resolved literal, or $null to hard-skip.
+    $resolveMember = {
+        param($member)
+        $rv = Resolve-CommandVariant -Platform $Platform -Member $member -DeviceVersion $DeviceVersion
+        if ($null -ne $rv.note -and $null -ne $VersionNotes) { [void]$VersionNotes.Add($rv.note) }
+        return $rv.command
+    }
+
+    # Build base + selected-group commands in canonical order, deduped. Each raw
+    # member may be a plain string or a version-guarded variant object.
     $ordered = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
     $baseCmds = @()
     if ($platGroups.Contains('base')) { $baseCmds = @($platGroups['base']) }
-    foreach ($c in $baseCmds) {
+
+    # Resolve the base literals once — reused for both the ordered set and the
+    # non-removable base guard below.
+    $resolvedBase = [System.Collections.Generic.List[string]]::new()
+    foreach ($member in $baseCmds) {
+        $cmd = & $resolveMember $member
+        if ($null -ne $cmd) { $resolvedBase.Add($cmd) }
+    }
+    foreach ($c in $resolvedBase) {
         if ($seen.Add($c.Trim())) { $ordered.Add($c) }
     }
     foreach ($gName in $featureNames) {
         if ($selected -notcontains $gName) { continue }
-        foreach ($c in @($platGroups[$gName])) {
-            if ($seen.Add($c.Trim())) { $ordered.Add($c) }
+        foreach ($member in @($platGroups[$gName])) {
+            $cmd = & $resolveMember $member
+            if ($null -eq $cmd) { continue }
+            if ($seen.Add($cmd.Trim())) { $ordered.Add($cmd) }
         }
     }
 
     # base is NON-REMOVABLE: drop any exclude that targets a base command before
     # applying the shared exclude/add resolver.
     $baseSet = [System.Collections.Generic.HashSet[string]]::new(
-        [string[]]@($baseCmds | ForEach-Object { $_.Trim() }),
+        [string[]]@($resolvedBase | ForEach-Object { $_.Trim() }),
         [System.StringComparer]::OrdinalIgnoreCase)
     $effectiveExcludes = @($ExcludeCommands | Where-Object { -not $baseSet.Contains(([string]$_).Trim()) })
 
