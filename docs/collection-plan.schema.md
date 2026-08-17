@@ -68,6 +68,31 @@ default / auto"):
 | `host_key_algorithms` | string  | `ssh -o HostKeyAlgorithms=<value>` |
 | `pty`                 | boolean | Force (`true`) / suppress (`false`) PTY allocation; `null` = auto-detect. |
 
+#### Merge semantics: `defaults.ssh_options` + device `ssh_options` (field-level)
+
+A device's `ssh_options` is merged **field-by-field** over
+`defaults.ssh_options`, **NOT** replaced wholesale. For each of the four fields
+above:
+
+- if the **device** supplies the field (a non-`null` value), the device value
+  wins;
+- otherwise the field is inherited from `defaults.ssh_options`;
+- if neither supplies it, the field is `null` (collector default / auto).
+
+This means a device that sets **only** `pty` still inherits the plan-wide
+`kex_algorithms` / `ciphers` / `host_key_algorithms` defaults. (A wholesale
+replace would silently drop those global crypto defaults, which breaks
+connections to legacy gear that depends on them.)
+
+`pty: false` is a **real value** (force-*suppress* PTY allocation), not
+"absent" — it is preserved and is **not** overwritten by a `defaults.pty`. Only
+an omitted / `null` `pty` inherits the default.
+
+Example — with `defaults.ssh_options = { "kex_algorithms": "+dh1",
+"ciphers": "+cbc" }` and device `ssh_options = { "pty": true }`, the device's
+effective options are `{ kex_algorithms: "+dh1", ciphers: "+cbc",
+host_key_algorithms: null, pty: true }`.
+
 ---
 
 ## Non-removable base

@@ -203,6 +203,25 @@ function ConvertTo-NormalizedSshOptions {
     }
 }
 
+# Merge a device's ssh_options blob over a defaults ssh_options blob at the
+# SUB-FIELD level: each of the four fields is taken from the device when the
+# device supplies it (non-null), otherwise inherited from defaults. This is a
+# field-merge, NOT a wholesale replace — a device that sets only 'pty' still
+# inherits the plan-wide kex/ciphers/host_key defaults. (Wholesale replace
+# silently drops the global crypto defaults, which fails connections to legacy
+# gear that relies on them — the C1 contract Reperio validates against.)
+# 'pty:false' is a real value (force-suppress PTY allocation), not "absent", so
+# it is preserved and not overwritten by the default's pty.
+function Merge-SshOptions {
+    param($DeviceValue, $DefaultValue)
+    $merged = ConvertTo-NormalizedSshOptions $DeviceValue
+    $def    = ConvertTo-NormalizedSshOptions $DefaultValue
+    foreach ($field in 'kex_algorithms', 'ciphers', 'host_key_algorithms', 'pty') {
+        if ($null -eq $merged.$field) { $merged.$field = $def.$field }
+    }
+    return $merged
+}
+
 # Build one normalized plan-device object. Shared by the JSON and CSV parsers so
 # both inputs produce an identical shape. Throws on a non-integer priority.
 function New-CollectionPlanDevice {
@@ -232,7 +251,10 @@ function New-CollectionPlanDevice {
 
     return [PSCustomObject]@{
         connect_ip       = $ConnectIp.Trim()
-        platform         = if ([string]::IsNullOrWhiteSpace($Platform)) { $null } else { $Platform.Trim() }
+        # platform is canonicalized to lowercase so the JSON and CSV paths (CSV
+        # already lowercases) produce ONE device shape; downstream catalog lookups
+        # are then case-stable.
+        platform         = if ([string]::IsNullOrWhiteSpace($Platform)) { $null } else { $Platform.Trim().ToLower() }
         profile          = if ([string]::IsNullOrWhiteSpace($ProfileName)) { $null } else { $ProfileName.Trim() }
         groups           = [string[]]$Groups
         exclude_commands = [string[]]$ExcludeCommands
@@ -295,7 +317,10 @@ function ConvertFrom-CollectionPlanJson {
         if ([string]::IsNullOrWhiteSpace($profileName) -and $groups.Count -eq 0) {
             $profileName = [string]$defaultProfile
         }
-        $ssh = Get-PlanProperty $d 'ssh_options' $defaultSsh
+        # Field-merge device ssh_options OVER defaults (see Merge-SshOptions):
+        # per-field override, not wholesale replace, so a device that sets only
+        # 'pty' keeps the global crypto defaults.
+        $ssh = Get-PlanProperty $d 'ssh_options'
         $cred = Get-PlanProperty $d 'credential_group' $defaultCredGroup
 
         New-CollectionPlanDevice `
@@ -305,7 +330,7 @@ function ConvertFrom-CollectionPlanJson {
             -Groups $groups `
             -ExcludeCommands (ConvertTo-StringArray (Get-PlanProperty $d 'exclude_commands')) `
             -AddCommands (ConvertTo-StringArray (Get-PlanProperty $d 'add_commands')) `
-            -SshOptions (ConvertTo-NormalizedSshOptions $ssh) `
+            -SshOptions (Merge-SshOptions $ssh $defaultSsh) `
             -Priority (Get-PlanProperty $d 'priority') `
             -CredentialGroup ([string]$cred) `
             -PlanId ([string]$planId)
@@ -420,7 +445,7 @@ function Get-CommandGroupCatalog {
             'collect-only-ops'    = @('show license all', 'show adjacency detail', 'show logging')
         }
         'cisco-router-iosxe' = [ordered]@{
-            'base'                = @('show version', 'show inventory', 'show interface', 'show interface description', 'show ip interface brief', 'show running-config', 'show ip protocols')
+            'base'                = @('show version', 'show inventory', 'show interface', 'show running-config', 'show ip protocols')
             'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
             'switching'           = @('show etherchannel summary')
             'routing-igp-ospf'    = @('show ip ospf neighbor', 'show ip ospf interface brief')
@@ -432,7 +457,9 @@ function Get-CommandGroupCatalog {
             'vrf'                 = @('show vrf')
             'arp'                 = @('show ip arp')
             'optics-transceiver'  = @('show interface transceiver')
-            'collect-only-ops'    = @('show license all', 'show adjacency detail', 'show ip nat translations', 'show ip access-lists', 'show logging last 100')
+            # 'show interface description' / 'show ip interface brief' are informative
+            # interface views, not needed to key the device — re-homed here out of base.
+            'collect-only-ops'    = @('show interface description', 'show ip interface brief', 'show license all', 'show adjacency detail', 'show ip nat translations', 'show ip access-lists', 'show logging last 100')
         }
         'cisco-switch-nxos'  = [ordered]@{
             # NX-OS sentinel is 'show ip route summary' (no 'show ip protocols' on NX-OS).
@@ -453,7 +480,7 @@ function Get-CommandGroupCatalog {
         }
         'cisco-router-iosxr' = [ordered]@{
             # IOS-XR sentinel is 'show route summary'. XR uses 'show interfaces'.
-            'base'                = @('show version', 'show inventory', 'show interfaces', 'show interfaces description', 'show ipv4 interface brief', 'show running-config', 'show route summary')
+            'base'                = @('show version', 'show inventory', 'show interfaces', 'show running-config', 'show route summary')
             'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
             'routing-igp-ospf'    = @('show ospf neighbors', 'show ospf interface')
             'routing-isis'        = @('show isis neighbors', 'show isis interface')
@@ -463,23 +490,30 @@ function Get-CommandGroupCatalog {
             'routing-tables-lite' = @('show route summary')
             'vrf'                 = @('show vrf all')
             'arp'                 = @('show arp', 'show arp vrf all')
-            'collect-only-ops'    = @('show mpls ldp neighbor', 'show platform', 'show redundancy summary', 'show environment', 'show logging')
+            # 'show interfaces description' / 'show ipv4 interface brief' are informative
+            # interface views, not needed to key the device — re-homed here out of base.
+            'collect-only-ops'    = @('show interfaces description', 'show ipv4 interface brief', 'show mpls ldp neighbor', 'show platform', 'show redundancy summary', 'show environment', 'show logging')
         }
         'cisco-wlc-aireos'   = [ordered]@{
             # AireOS identity is 'show sysinfo' + 'show inventory'; run-config equiv is
-            # 'show run-config commands'; interface equiv is 'show interface summary'.
-            'base'             = @('show sysinfo', 'show inventory', 'show interface summary', 'show port summary', 'show run-config commands')
+            # 'show run-config commands'. The interface views ('show interface summary',
+            # 'show port summary') feed WLC interface processing, not device keying, so
+            # they live in the 'wireless' group rather than base.
+            'base'             = @('show sysinfo', 'show inventory', 'show run-config commands')
             'neighbors'        = @('show cdp neighbors detail')
-            'wireless'         = @('show ap summary', 'show wlan summary', 'show flexconnect group summary', 'show client summary')
+            'wireless'         = @('show interface summary', 'show port summary', 'show ap summary', 'show wlan summary', 'show flexconnect group summary', 'show client summary')
             'collect-only-ops' = @('show redundancy summary', 'show redundancy detail', 'show msglog')
         }
         'cisco-wlc-iosxe'    = [ordered]@{
             # 9800 identity additionally includes 'show wireless client summary'.
-            'base'             = @('show startup-config | include hostname', 'show version', 'show inventory', 'show interface', 'show wireless client summary', 'show running-config')
+            # Hostname keys off 'show version' + 'show running-config' + the live prompt,
+            # so 'show startup-config | include hostname' is redundant for keying — it is
+            # re-homed to 'collect-only-ops' (retained as informative, out of base).
+            'base'             = @('show version', 'show inventory', 'show interface', 'show wireless client summary', 'show running-config')
             'neighbors'        = @('show cdp neighbors detail', 'show lldp neighbors detail')
             'switching'        = @('show etherchannel summary')
             'wireless'         = @('show wireless summary', 'show ap summary', 'show ap cdp neighbors', 'show wlan summary', 'show wireless tag policy summary')
-            'collect-only-ops' = @('show chassis', 'show redundancy', 'show logging last 100')
+            'collect-only-ops' = @('show startup-config | include hostname', 'show chassis', 'show redundancy', 'show logging last 100')
         }
     }
 }

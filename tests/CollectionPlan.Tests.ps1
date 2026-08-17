@@ -40,6 +40,40 @@ Describe 'ConvertTo-NormalizedSshOptions' {
     }
 }
 
+Describe 'Merge-SshOptions — field-level merge over defaults' {
+    It 'inherits the default sub-fields the device omits (device sets only pty)' {
+        $def = [PSCustomObject]@{ kex_algorithms = '+dh1'; ciphers = '+cbc' }
+        $dev = [PSCustomObject]@{ pty = $true }
+        $m = Merge-SshOptions $dev $def
+        $m.kex_algorithms      | Should -Be '+dh1'
+        $m.ciphers             | Should -Be '+cbc'
+        $m.host_key_algorithms | Should -Be $null
+        $m.pty                 | Should -BeTrue
+    }
+    It 'lets a device field override the matching default field' {
+        $def = [PSCustomObject]@{ kex_algorithms = '+dh1'; ciphers = '+cbc' }
+        $dev = [PSCustomObject]@{ kex_algorithms = '+dh14' }
+        $m = Merge-SshOptions $dev $def
+        $m.kex_algorithms | Should -Be '+dh14'
+        $m.ciphers        | Should -Be '+cbc'
+    }
+    It 'preserves an explicit device pty:false (not swallowed by default pty:true)' {
+        $def = [PSCustomObject]@{ pty = $true }
+        $dev = [PSCustomObject]@{ pty = $false }
+        (Merge-SshOptions $dev $def).pty | Should -BeFalse
+    }
+    It 'inherits the default pty when the device omits pty' {
+        $def = [PSCustomObject]@{ pty = $true }
+        $dev = [PSCustomObject]@{ kex_algorithms = '+dh1' }
+        (Merge-SshOptions $dev $def).pty | Should -BeTrue
+    }
+    It 'returns all-null when neither side supplies anything' {
+        $m = Merge-SshOptions $null $null
+        $m.kex_algorithms | Should -Be $null
+        $m.pty            | Should -Be $null
+    }
+}
+
 Describe 'ConvertFrom-CollectionPlanJson' {
     It 'parses a full plan and echoes plan_id to every device' {
         $json = @'
@@ -96,6 +130,21 @@ Describe 'ConvertFrom-CollectionPlanJson' {
         $plan = ConvertFrom-CollectionPlanJson -Json $json
         $plan.devices[0].credential_group    | Should -Be 'core'
         $plan.devices[0].ssh_options.ciphers | Should -Be '+cbc'
+    }
+
+    It 'field-merges device ssh_options OVER defaults.ssh_options (device sets only pty)' {
+        $json = '{ "defaults": { "ssh_options": { "kex_algorithms": "+dh1", "ciphers": "+cbc" } }, "devices": [ { "connect_ip": "1.2.3.4", "profile": "full", "ssh_options": { "pty": true } } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $o = $plan.devices[0].ssh_options
+        $o.kex_algorithms | Should -Be '+dh1'   # inherited from defaults
+        $o.ciphers        | Should -Be '+cbc'   # inherited from defaults
+        $o.pty            | Should -BeTrue       # from device
+    }
+
+    It 'preserves a device pty:false against a defaults pty:true' {
+        $json = '{ "defaults": { "ssh_options": { "pty": true } }, "devices": [ { "connect_ip": "1.2.3.4", "profile": "full", "ssh_options": { "pty": false } } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].ssh_options.pty | Should -BeFalse
     }
 
     It 'defaults schema_version to 1 when omitted' {
@@ -193,5 +242,24 @@ IP,OS
     It 'throws when there are no data rows' {
         { ConvertFrom-CollectionCsv -CsvText "IP,OS" } |
             Should -Throw -ExpectedMessage '*no data rows*'
+    }
+}
+
+Describe 'Canonical platform shape — JSON and CSV agree (lowercase)' {
+    It 'lowercases a mixed-case platform from the JSON path' {
+        $json = '{ "devices": [ { "connect_ip": "1.2.3.4", "platform": "Cisco-Switch-IOSXE" } ] }'
+        (ConvertFrom-CollectionPlanJson -Json $json).devices[0].platform | Should -Be 'cisco-switch-iosxe'
+    }
+    It 'lowercases a mixed-case OS from the CSV path' {
+        $csv = "IP,OS`n10.0.0.1,Cisco-Switch-IOSXE"
+        (ConvertFrom-CollectionCsv -CsvText $csv).devices[0].platform | Should -Be 'cisco-switch-iosxe'
+    }
+    It 'produces the identical canonical platform from both paths' {
+        $json = '{ "devices": [ { "connect_ip": "1.2.3.4", "platform": "CISCO-ROUTER-IOSXR" } ] }'
+        $csv = "IP,OS`n1.2.3.4,CISCO-ROUTER-IOSXR"
+        $fromJson = (ConvertFrom-CollectionPlanJson -Json $json).devices[0].platform
+        $fromCsv = (ConvertFrom-CollectionCsv -CsvText $csv).devices[0].platform
+        $fromJson | Should -Be $fromCsv
+        $fromJson | Should -Be 'cisco-router-iosxr'
     }
 }

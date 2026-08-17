@@ -177,3 +177,71 @@ Describe 'Resolve-ProfileCommandList — wlc profiles' {
         $r | Should -Contain 'show wireless client summary'
     }
 }
+
+Describe 'Profile/catalog consistency (typo guard)' {
+    It 'every group named by any profile is defined by at least one platform catalog' {
+        $cat = Get-CommandGroupCatalog
+        $profiles = Get-CollectionProfileCatalog
+
+        # Union of every group name any platform defines.
+        $known = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($plat in $cat.Keys) {
+            foreach ($g in $cat[$plat].Keys) { [void]$known.Add($g) }
+        }
+
+        foreach ($pName in $profiles.Keys) {
+            $sel = $profiles[$pName]
+            # The '*' sentinel means "all of this platform's groups" — nothing to typo-check.
+            if (($sel -is [string]) -and ($sel -eq '*')) { continue }
+            foreach ($g in @($sel)) {
+                $known.Contains($g) | Should -BeTrue -Because "profile '$pName' references group '$g', which no platform catalog defines (likely a typo). Cross-platform-only groups such as routing-isis are fine — this only fails when NO platform defines the group at all."
+            }
+        }
+    }
+}
+
+Describe 'Base tightening — deliberate extras re-homed OUT of base' {
+    BeforeAll { $script:cat = Get-CommandGroupCatalog }
+
+    It 'router-iosxe: interface description / ip interface brief are collect-only, not base' {
+        $script:cat['cisco-router-iosxe']['base'] | Should -Not -Contain 'show interface description'
+        $script:cat['cisco-router-iosxe']['base'] | Should -Not -Contain 'show ip interface brief'
+        $script:cat['cisco-router-iosxe']['collect-only-ops'] | Should -Contain 'show interface description'
+        $script:cat['cisco-router-iosxe']['collect-only-ops'] | Should -Contain 'show ip interface brief'
+    }
+
+    It 'router-iosxr: interfaces description / ipv4 interface brief are collect-only, not base' {
+        $script:cat['cisco-router-iosxr']['base'] | Should -Not -Contain 'show interfaces description'
+        $script:cat['cisco-router-iosxr']['base'] | Should -Not -Contain 'show ipv4 interface brief'
+        $script:cat['cisco-router-iosxr']['collect-only-ops'] | Should -Contain 'show interfaces description'
+        $script:cat['cisco-router-iosxr']['collect-only-ops'] | Should -Contain 'show ipv4 interface brief'
+    }
+
+    It 'aireos: interface/port summary live in wireless, not base' {
+        $script:cat['cisco-wlc-aireos']['base'] | Should -Not -Contain 'show interface summary'
+        $script:cat['cisco-wlc-aireos']['base'] | Should -Not -Contain 'show port summary'
+        $script:cat['cisco-wlc-aireos']['wireless'] | Should -Contain 'show interface summary'
+        $script:cat['cisco-wlc-aireos']['wireless'] | Should -Contain 'show port summary'
+    }
+
+    It 'aireos base is exactly identity + running-config' {
+        $script:cat['cisco-wlc-aireos']['base'] |
+            Should -Be @('show sysinfo', 'show inventory', 'show run-config commands')
+    }
+
+    It 'wlc profile on AireOS still collects the interface views (now via wireless)' {
+        $r = Resolve-ProfileCommandList -Platform 'cisco-wlc-aireos' -ProfileName 'wlc'
+        $r | Should -Contain 'show interface summary'
+        $r | Should -Contain 'show port summary'
+    }
+
+    It '9800: startup-config hostname helper is collect-only, not base' {
+        $script:cat['cisco-wlc-iosxe']['base'] | Should -Not -Contain 'show startup-config | include hostname'
+        $script:cat['cisco-wlc-iosxe']['collect-only-ops'] | Should -Contain 'show startup-config | include hostname'
+    }
+
+    It '9800 base still keys off show version + running-config' {
+        $script:cat['cisco-wlc-iosxe']['base'] | Should -Contain 'show version'
+        $script:cat['cisco-wlc-iosxe']['base'] | Should -Contain 'show running-config'
+    }
+}
