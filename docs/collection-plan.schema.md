@@ -123,11 +123,22 @@ The legacy CSV device list still parses via `ConvertFrom-CollectionCsv`:
 This schema is deliberately shaped so later slices attach without a breaking
 change:
 
-- **Version-guarded command variants (task 0c):** a group's command is a plain
-  string today. A future catalog may replace a string with an object
-  (`{ "command": "...", "min_version": "...", "max_version": "..." }`) and the
-  resolver will select by device firmware. Consumers must treat a group member as
-  "either a string or an object with a `command` field".
+- **Version-guarded command variants (task 0c — IMPLEMENTED):** a group member is
+  a plain string (unversioned, always collected) OR a version-guarded object.
+  `Resolve-CommandVariant` (in `lib/CollectorCore.ps1`) selects the literal for a
+  device's detected firmware version (`Get-DeviceFirmwareVersion` +
+  `Compare-FirmwareVersion`). Two object shapes are accepted:
+  - single-variant: `{ "command": "...", "min_version": "...", "max_version": "..." }`
+  - multi-variant (a logical command whose syntax changed across a firmware
+    boundary): `{ "variants": [ { "command", "min_version", "max_version" }, ... ],
+    "on_unknown": "newest" | "skip" }`.
+  When the device version is unknown/unparseable the resolver defaults to the
+  **newest** variant (and logs a note); `on_unknown: "skip"` hard-skips instead,
+  for commands where guessing wrong is harmful. Consumers must treat a group member
+  as "either a string or an object with a `command`/`variants` field". Actual
+  per-command variants are DATA added to the catalog as discovered; the mechanism
+  ships in Slice 2 with a synthetic archetype (IOS-XE 17.2 syntax change) covered
+  by the tests.
 - **Richer summary round-trip (task 0d):** `plan_id` (and, later, per-device
   `priority` / `credential_group` / `ssh_options`) already ride on the plan so the
   v2 `collection-summary.json` can echo them.
