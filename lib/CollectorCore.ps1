@@ -156,3 +156,463 @@ function ConvertTo-SafeFileName {
     param([string]$InputString)
     return ($InputString -replace '[\\/:*?"<>|]', '_')
 }
+
+# =============================================================================
+# COLLECTION PLAN INPUT (schema_version 1)
+# See docs/collection-plan.schema.md. Pure parse/normalize logic for the
+# structured JSON collection plan and the transitional CSV device list. Both
+# paths emit the SAME normalized device shape so downstream resolution is
+# input-agnostic. No file I/O here — callers pass raw text.
+# =============================================================================
+
+# Read a property off a PSObject/hashtable, returning $Default when the object is
+# $null, the property is absent, or its value is $null. Strict-mode safe (never
+# dereferences a missing property).
+function Get-PlanProperty {
+    param(
+        $Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Default = $null
+    )
+    if ($null -eq $Object) { return $Default }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $Default }
+    if ($null -eq $prop.Value) { return $Default }
+    return $prop.Value
+}
+
+# Coerce an arbitrary value (scalar, array, or $null) into a trimmed [string[]]
+# with empty entries dropped. Always returns an array (comma-unrolling is the
+# caller's job — pass a pre-split collection).
+function ConvertTo-StringArray {
+    param($Value)
+    if ($null -eq $Value) { return , ([string[]]@()) }
+    $items = @($Value | ForEach-Object { if ($null -ne $_) { ([string]$_).Trim() } } | Where-Object { $_ -ne '' })
+    return , ([string[]]$items)
+}
+
+# Normalize an ssh_options blob into the four documented fields. Missing fields
+# become $null ("collector default / auto").
+function ConvertTo-NormalizedSshOptions {
+    param($Value)
+    return [PSCustomObject]@{
+        kex_algorithms      = Get-PlanProperty $Value 'kex_algorithms'
+        ciphers             = Get-PlanProperty $Value 'ciphers'
+        host_key_algorithms = Get-PlanProperty $Value 'host_key_algorithms'
+        pty                 = Get-PlanProperty $Value 'pty'
+    }
+}
+
+# Merge a device's ssh_options blob over a defaults ssh_options blob at the
+# SUB-FIELD level: each of the four fields is taken from the device when the
+# device supplies it (non-null), otherwise inherited from defaults. This is a
+# field-merge, NOT a wholesale replace — a device that sets only 'pty' still
+# inherits the plan-wide kex/ciphers/host_key defaults. (Wholesale replace
+# silently drops the global crypto defaults, which fails connections to legacy
+# gear that relies on them — the C1 contract Reperio validates against.)
+# 'pty:false' is a real value (force-suppress PTY allocation), not "absent", so
+# it is preserved and not overwritten by the default's pty.
+function Merge-SshOptions {
+    param($DeviceValue, $DefaultValue)
+    $merged = ConvertTo-NormalizedSshOptions $DeviceValue
+    $def    = ConvertTo-NormalizedSshOptions $DefaultValue
+    foreach ($field in 'kex_algorithms', 'ciphers', 'host_key_algorithms', 'pty') {
+        if ($null -eq $merged.$field) { $merged.$field = $def.$field }
+    }
+    return $merged
+}
+
+# Build one normalized plan-device object. Shared by the JSON and CSV parsers so
+# both inputs produce an identical shape. Throws on a non-integer priority.
+function New-CollectionPlanDevice {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ConnectIp,
+        [string]$Platform,
+        [string]$ProfileName,
+        [string[]]$Groups = @(),
+        [string[]]$ExcludeCommands = @(),
+        [string[]]$AddCommands = @(),
+        $SshOptions = $null,
+        $Priority = $null,
+        [string]$CredentialGroup,
+        [string]$Category,
+        [string]$PlanId
+    )
+    $prio = $null
+    if ($null -ne $Priority -and "$Priority".Trim() -ne '') {
+        $parsed = 0
+        if ([int]::TryParse("$Priority".Trim(), [ref]$parsed)) { $prio = $parsed }
+        else { throw "Device '$ConnectIp' has a non-integer priority '$Priority'." }
+    }
+    if ($null -eq $Groups) { $Groups = @() }
+    if ($null -eq $ExcludeCommands) { $ExcludeCommands = @() }
+    if ($null -eq $AddCommands) { $AddCommands = @() }
+
+    return [PSCustomObject]@{
+        connect_ip       = $ConnectIp.Trim()
+        # platform is canonicalized to lowercase so the JSON and CSV paths (CSV
+        # already lowercases) produce ONE device shape; downstream catalog lookups
+        # are then case-stable.
+        platform         = if ([string]::IsNullOrWhiteSpace($Platform)) { $null } else { $Platform.Trim().ToLower() }
+        profile          = if ([string]::IsNullOrWhiteSpace($ProfileName)) { $null } else { $ProfileName.Trim() }
+        groups           = [string[]]$Groups
+        exclude_commands = [string[]]$ExcludeCommands
+        add_commands     = [string[]]$AddCommands
+        ssh_options      = $SshOptions
+        priority         = $prio
+        credential_group = if ([string]::IsNullOrWhiteSpace($CredentialGroup)) { $null } else { $CredentialGroup.Trim() }
+        category         = if ([string]::IsNullOrWhiteSpace($Category)) { $null } else { $Category.Trim() }
+        plan_id          = if ([string]::IsNullOrWhiteSpace($PlanId)) { $null } else { $PlanId.Trim() }
+    }
+}
+
+# Parse a structured JSON collection plan (schema_version 1) into a normalized
+# object: @{ schema_version; plan_id; devices = [normalized device, ...] }.
+# Throws clear errors on malformed JSON, wrong schema_version, a missing/empty
+# devices array, or a device missing connect_ip.
+function ConvertFrom-CollectionPlanJson {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Json)
+
+    if ([string]::IsNullOrWhiteSpace($Json)) {
+        throw "Collection plan JSON is empty."
+    }
+    try {
+        $doc = $Json | ConvertFrom-Json
+    }
+    catch {
+        throw "Collection plan is not valid JSON: $($_.Exception.Message)"
+    }
+    if ($null -eq $doc) { throw "Collection plan JSON parsed to null." }
+
+    $schemaVersion = Get-PlanProperty $doc 'schema_version' 1
+    if ("$schemaVersion" -ne '1') {
+        throw "Unsupported collection plan schema_version '$schemaVersion' (this collector supports 1)."
+    }
+
+    $planId = Get-PlanProperty $doc 'plan_id'
+    $defaults = Get-PlanProperty $doc 'defaults'
+    $defaultProfile = Get-PlanProperty $defaults 'profile' 'full'
+    $defaultCredGroup = Get-PlanProperty $defaults 'credential_group'
+    $defaultSsh = Get-PlanProperty $defaults 'ssh_options'
+
+    # Check the property directly rather than via Get-PlanProperty: an empty array
+    # returned from a function collapses to $null in PowerShell, which would make an
+    # empty 'devices' indistinguishable from an absent one.
+    $devicesProp = $doc.PSObject.Properties['devices']
+    if ($null -eq $devicesProp -or $null -eq $devicesProp.Value) {
+        throw "Collection plan has no 'devices' array."
+    }
+    $rawDevices = @($devicesProp.Value)
+    if ($rawDevices.Count -eq 0) { throw "Collection plan 'devices' array is empty." }
+
+    $devices = foreach ($d in $rawDevices) {
+        $ip = [string](Get-PlanProperty $d 'connect_ip')
+        if ([string]::IsNullOrWhiteSpace($ip)) {
+            throw "Collection plan device is missing the required 'connect_ip' field."
+        }
+        $groups = ConvertTo-StringArray (Get-PlanProperty $d 'groups')
+        $profileName = [string](Get-PlanProperty $d 'profile')
+        if ([string]::IsNullOrWhiteSpace($profileName) -and $groups.Count -eq 0) {
+            $profileName = [string]$defaultProfile
+        }
+        # Field-merge device ssh_options OVER defaults (see Merge-SshOptions):
+        # per-field override, not wholesale replace, so a device that sets only
+        # 'pty' keeps the global crypto defaults.
+        $ssh = Get-PlanProperty $d 'ssh_options'
+        $cred = Get-PlanProperty $d 'credential_group' $defaultCredGroup
+
+        New-CollectionPlanDevice `
+            -ConnectIp $ip `
+            -Platform ([string](Get-PlanProperty $d 'platform')) `
+            -ProfileName $profileName `
+            -Groups $groups `
+            -ExcludeCommands (ConvertTo-StringArray (Get-PlanProperty $d 'exclude_commands')) `
+            -AddCommands (ConvertTo-StringArray (Get-PlanProperty $d 'add_commands')) `
+            -SshOptions (Merge-SshOptions $ssh $defaultSsh) `
+            -Priority (Get-PlanProperty $d 'priority') `
+            -CredentialGroup ([string]$cred) `
+            -PlanId ([string]$planId)
+    }
+
+    return [PSCustomObject]@{
+        schema_version = 1
+        plan_id        = if ([string]::IsNullOrWhiteSpace([string]$planId)) { $null } else { ([string]$planId).Trim() }
+        devices        = @($devices)
+    }
+}
+
+# Parse the transitional CSV device list (IP,Category,OS,ExcludeCommands,
+# AddCommands) into the SAME normalized shape as the JSON path, mapping every
+# row to the default 'full' profile. Comment (#) and blank lines are ignored.
+# Throws on a missing IP/OS column or a row missing the OS field.
+function ConvertFrom-CollectionCsv {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$CsvText)
+
+    $lines = @($CsvText -split "`r?`n" | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimStart().StartsWith('#')
+        })
+    if ($lines.Count -le 1) {
+        throw "Device CSV has no data rows (need a header row plus at least one device)."
+    }
+    $rows = @($lines | ConvertFrom-Csv)
+    if ($rows.Count -eq 0) {
+        throw "Device CSV has no data rows."
+    }
+
+    $columns = $rows[0].PSObject.Properties.Name
+    if ('IP' -notin $columns -or 'OS' -notin $columns) {
+        throw "Device CSV must have 'IP' and 'OS' columns (Category is optional). Found: $($columns -join ', ')"
+    }
+    $hasCategory = 'Category' -in $columns
+    $hasExclude = 'ExcludeCommands' -in $columns
+    $hasAdd = 'AddCommands' -in $columns
+
+    $devices = foreach ($row in $rows) {
+        $ip = [string](Get-PlanProperty $row 'IP')
+        $os = [string](Get-PlanProperty $row 'OS')
+        if ([string]::IsNullOrWhiteSpace($ip) -or $ip.TrimStart().StartsWith('#')) { continue }
+        if ([string]::IsNullOrWhiteSpace($os)) {
+            throw "Device '$($ip.Trim())' in CSV is missing the OS field."
+        }
+
+        $exclCell = if ($hasExclude) { [string](Get-PlanProperty $row 'ExcludeCommands') } else { '' }
+        $addCell = if ($hasAdd) { [string](Get-PlanProperty $row 'AddCommands') } else { '' }
+        $excl = if ($exclCell -ne '') { $exclCell -split ',' } else { @() }
+        $add = if ($addCell -ne '') { $addCell -split ',' } else { @() }
+        $cat = if ($hasCategory) { [string](Get-PlanProperty $row 'Category') } else { '' }
+
+        New-CollectionPlanDevice `
+            -ConnectIp $ip `
+            -Platform ($os.Trim().ToLower()) `
+            -ProfileName 'full' `
+            -ExcludeCommands (ConvertTo-StringArray $excl) `
+            -AddCommands (ConvertTo-StringArray $add) `
+            -SshOptions (ConvertTo-NormalizedSshOptions $null) `
+            -Category $cat
+    }
+
+    $devices = @($devices)
+    if ($devices.Count -eq 0) {
+        throw "Device CSV has no valid device rows."
+    }
+
+    return [PSCustomObject]@{
+        schema_version = 1
+        plan_id        = $null
+        devices        = $devices
+    }
+}
+
+# =============================================================================
+# COMMAND GROUPS + PROFILES (task 0b)
+# The per-platform command sets are organized into named FEATURE GROUPS; a
+# PROFILE is a named composition of groups. A device's profile (or explicit
+# group list) resolves to its command set. This replaces the flat, per-OS
+# commands/<os>.txt files as the source of truth for *what a profile collects*.
+#
+# The 'base' group is NON-REMOVABLE: identity commands, running-config, and the
+# per-platform sentinel are always collected and cannot be dropped by a profile
+# choice or an exclude. Enforced in Resolve-ProfileCommandList.
+#
+# Forward-compat (task 0c): a group member is a plain string today. A later
+# catalog may make it an object { command; min_version; max_version } and the
+# resolver will select by firmware. See docs/collection-plan.schema.md.
+# =============================================================================
+
+# Per-platform feature-group catalog. Each platform maps to an ORDERED hashtable
+# of groupName -> [string[]] commands. Group order here is the canonical output
+# order (base first, then groups in declared order). 'base' must be present for
+# every platform.
+function Get-CommandGroupCatalog {
+    return @{
+        'cisco-switch-iosxe' = [ordered]@{
+            'base'                = @('show version', 'show inventory', 'show interface', 'show interface status', 'show switch', 'show running-config', 'show ip protocols')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'           = @('show mac address-table', 'show etherchannel summary')
+            'power'               = @('show power inline')
+            'routing-igp-ospf'    = @('show ip ospf neighbor', 'show ip ospf interface brief')
+            'routing-igp-eigrp'   = @('show ip eigrp neighbors', 'show ip eigrp topology')
+            'routing-bgp'         = @('show ip bgp summary', 'show ip bgp neighbors')
+            'routing-tables-full' = @('show ip route', 'show ip route vrf *')
+            # PLACEHOLDER (Phase-2 finalizes; private-prefix longer-prefixes queries TBD).
+            'routing-tables-lite' = @('show ip route connected', 'show ip route static', 'show ip route local', 'show ip route summary')
+            'vrf'                 = @('show vrf')
+            'arp'                 = @('show ip arp', 'show ip arp vrf all')
+            'optics-transceiver'  = @('show interface transceiver', 'show interface transceiver detail')
+            'collect-only-ops'    = @('show license all', 'show adjacency detail', 'show logging')
+        }
+        'cisco-router-iosxe' = [ordered]@{
+            'base'                = @('show version', 'show inventory', 'show interface', 'show running-config', 'show ip protocols')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'           = @('show etherchannel summary')
+            'routing-igp-ospf'    = @('show ip ospf neighbor', 'show ip ospf interface brief')
+            'routing-igp-eigrp'   = @('show ip eigrp neighbors', 'show ip eigrp topology')
+            'routing-bgp'         = @('show ip bgp summary', 'show ip bgp neighbors')
+            'routing-tables-full' = @('show ip route', 'show ip route vrf *')
+            # PLACEHOLDER (Phase-2 finalizes).
+            'routing-tables-lite' = @('show ip route connected', 'show ip route static', 'show ip route local', 'show ip route summary')
+            'vrf'                 = @('show vrf')
+            'arp'                 = @('show ip arp')
+            'optics-transceiver'  = @('show interface transceiver')
+            # 'show interface description' / 'show ip interface brief' are informative
+            # interface views, not needed to key the device — re-homed here out of base.
+            'collect-only-ops'    = @('show interface description', 'show ip interface brief', 'show license all', 'show adjacency detail', 'show ip nat translations', 'show ip access-lists', 'show logging last 100')
+        }
+        'cisco-switch-nxos'  = [ordered]@{
+            # NX-OS sentinel is 'show ip route summary' (no 'show ip protocols' on NX-OS).
+            'base'                = @('show version', 'show inventory', 'show interface', 'show interface status', 'show running-config', 'show ip route summary')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'           = @('show mac address-table', 'show port-channel summary')
+            'routing-igp-ospf'    = @('show ip ospf neighbor', 'show ip ospf interface brief')
+            'routing-igp-eigrp'   = @('show ip eigrp neighbors')
+            'routing-bgp'         = @('show ip bgp summary', 'show ip bgp neighbors')
+            'routing-tables-full' = @('show ip route vrf all')
+            # PLACEHOLDER (Phase-2 finalizes; NX-OS route-type filters differ from IOS).
+            'routing-tables-lite' = @('show ip route summary')
+            'vrf'                 = @('show vrf')
+            'arp'                 = @('show ip arp detail vrf all')
+            'optics-transceiver'  = @('show interface transceiver', 'show interface transceiver details')
+            'vdc'                 = @('show vdc detail')
+            'collect-only-ops'    = @('show logging last 100')
+        }
+        'cisco-router-iosxr' = [ordered]@{
+            # IOS-XR sentinel is 'show route summary'. XR uses 'show interfaces'.
+            'base'                = @('show version', 'show inventory', 'show interfaces', 'show running-config', 'show route summary')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'routing-igp-ospf'    = @('show ospf neighbors', 'show ospf interface')
+            'routing-isis'        = @('show isis neighbors', 'show isis interface')
+            'routing-bgp'         = @('show bgp summary', 'show bgp neighbors')
+            'routing-tables-full' = @('show route', 'show route vrf all')
+            # PLACEHOLDER (Phase-2 finalizes).
+            'routing-tables-lite' = @('show route summary')
+            'vrf'                 = @('show vrf all')
+            'arp'                 = @('show arp', 'show arp vrf all')
+            # 'show interfaces description' / 'show ipv4 interface brief' are informative
+            # interface views, not needed to key the device — re-homed here out of base.
+            'collect-only-ops'    = @('show interfaces description', 'show ipv4 interface brief', 'show mpls ldp neighbor', 'show platform', 'show redundancy summary', 'show environment', 'show logging')
+        }
+        'cisco-wlc-aireos'   = [ordered]@{
+            # AireOS identity is 'show sysinfo' + 'show inventory'; run-config equiv is
+            # 'show run-config commands'. The interface views ('show interface summary',
+            # 'show port summary') feed WLC interface processing, not device keying, so
+            # they live in the 'wireless' group rather than base.
+            'base'             = @('show sysinfo', 'show inventory', 'show run-config commands')
+            'neighbors'        = @('show cdp neighbors detail')
+            'wireless'         = @('show interface summary', 'show port summary', 'show ap summary', 'show wlan summary', 'show flexconnect group summary', 'show client summary')
+            'collect-only-ops' = @('show redundancy summary', 'show redundancy detail', 'show msglog')
+        }
+        'cisco-wlc-iosxe'    = [ordered]@{
+            # 9800 identity additionally includes 'show wireless client summary'.
+            # Hostname keys off 'show version' + 'show running-config' + the live prompt,
+            # so 'show startup-config | include hostname' is redundant for keying — it is
+            # re-homed to 'collect-only-ops' (retained as informative, out of base).
+            'base'             = @('show version', 'show inventory', 'show interface', 'show wireless client summary', 'show running-config')
+            'neighbors'        = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'        = @('show etherchannel summary')
+            'wireless'         = @('show wireless summary', 'show ap summary', 'show ap cdp neighbors', 'show wlan summary', 'show wireless tag policy summary')
+            'collect-only-ops' = @('show startup-config | include hostname', 'show chassis', 'show redundancy', 'show logging last 100')
+        }
+    }
+}
+
+# Named profiles = feature-group compositions applied ON TOP OF base (base is
+# always included regardless). The '*' sentinel means "all feature groups the
+# platform defines, except routing-tables-lite" (lite is a strict alternative to
+# routing-tables-full, so 'full' uses -full and never both). Groups a profile
+# names but a platform does not define are silently skipped (e.g. routing-isis
+# on non-XR), which is expected, not an error.
+function Get-CollectionProfileCatalog {
+    return @{
+        'full'      = '*'
+        'l2-switch' = @('switching', 'power', 'optics-transceiver', 'neighbors')
+        'l3-switch' = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-full', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
+        'router'    = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-full', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
+        'bgp-heavy' = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-lite', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
+        'wlc'       = @('wireless', 'neighbors')
+    }
+}
+
+# Resolve a device's effective command list from its platform + (profile OR
+# explicit groups) + per-device excludes/adds.
+#   - base commands always come first and are NON-REMOVABLE (an exclude naming a
+#     base command is ignored);
+#   - selected feature groups follow in the catalog's declared group order;
+#   - commands are deduped case-insensitively (first occurrence wins);
+#   - excludes/adds are then applied via the shared Resolve-DeviceCommandList.
+# Explicit -Groups (when non-empty) takes precedence over -ProfileName. Groups
+# not defined for the platform are skipped. Returns a [string[]].
+function Resolve-ProfileCommandList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [string]$ProfileName,
+        [string[]]$Groups = @(),
+        [string[]]$ExcludeCommands = @(),
+        [string[]]$AddCommands = @(),
+        $Catalog = $null,
+        $ProfileCatalog = $null
+    )
+    if ($null -eq $Catalog) { $Catalog = Get-CommandGroupCatalog }
+    if ($null -eq $ProfileCatalog) { $ProfileCatalog = Get-CollectionProfileCatalog }
+    if ($null -eq $Groups) { $Groups = @() }
+    if ($null -eq $ExcludeCommands) { $ExcludeCommands = @() }
+    if ($null -eq $AddCommands) { $AddCommands = @() }
+
+    if (-not $Catalog.Contains($Platform)) {
+        throw "Unknown platform '$Platform' — no command-group catalog entry."
+    }
+    $platGroups = $Catalog[$Platform]
+
+    # Non-base group names this platform defines (canonical order preserved).
+    $featureNames = @($platGroups.Keys | Where-Object { $_ -ne 'base' })
+
+    # Determine the selected feature-group list.
+    if ($Groups.Count -gt 0) {
+        $selected = @($Groups)
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($ProfileName)) {
+        if (-not $ProfileCatalog.Contains($ProfileName)) {
+            throw "Unknown profile '$ProfileName'. Known profiles: $(@($ProfileCatalog.Keys | Sort-Object) -join ', ')."
+        }
+        $sel = $ProfileCatalog[$ProfileName]
+        if (($sel -is [string]) -and ($sel -eq '*')) {
+            $selected = @($featureNames | Where-Object { $_ -ne 'routing-tables-lite' })
+        }
+        else {
+            $selected = @($sel)
+        }
+    }
+    else {
+        # Neither groups nor profile: default to the 'full' composition.
+        $selected = @($featureNames | Where-Object { $_ -ne 'routing-tables-lite' })
+    }
+
+    # Build base + selected-group commands in canonical order, deduped.
+    $ordered = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    $baseCmds = @()
+    if ($platGroups.Contains('base')) { $baseCmds = @($platGroups['base']) }
+    foreach ($c in $baseCmds) {
+        if ($seen.Add($c.Trim())) { $ordered.Add($c) }
+    }
+    foreach ($gName in $featureNames) {
+        if ($selected -notcontains $gName) { continue }
+        foreach ($c in @($platGroups[$gName])) {
+            if ($seen.Add($c.Trim())) { $ordered.Add($c) }
+        }
+    }
+
+    # base is NON-REMOVABLE: drop any exclude that targets a base command before
+    # applying the shared exclude/add resolver.
+    $baseSet = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@($baseCmds | ForEach-Object { $_.Trim() }),
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $effectiveExcludes = @($ExcludeCommands | Where-Object { -not $baseSet.Contains(([string]$_).Trim()) })
+
+    return Resolve-DeviceCommandList -BaseCommands ([string[]]$ordered.ToArray()) `
+        -ExcludeCommands $effectiveExcludes -AddCommands $AddCommands
+}
