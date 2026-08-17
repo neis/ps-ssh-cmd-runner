@@ -12,12 +12,21 @@
     Failed connections are logged separately for follow-up.
 
 .PARAMETER DeviceListFile
-    Path to a text file containing one IP address per line. Blank lines and comments (#) are ignored.
+    Path to the device list. Two formats are accepted and auto-detected:
+      * A structured JSON collection plan (schema_version 1) — parsed by
+        ConvertFrom-CollectionPlanJson (lib/CollectorCore.ps1). Carries per-device
+        platform, collection profile / feature groups, exclude/add commands, and a
+        top-level plan_id echoed to the collection summary.
+      * The transitional CSV device list (IP,Category,OS[,ExcludeCommands,AddCommands])
+        with a header row — parsed by ConvertFrom-CollectionCsv, mapped to the 'full'
+        profile. Blank lines and comment (#) lines are ignored.
+    Detection is by extension (.json) and by a leading-'{' content sniff.
 
 .PARAMETER CommandsDirectory
-    Directory containing per-OS command files. Each file must be named
-    <os-type>.txt (e.g. cisco-switch-iosxe.txt, cisco-switch-nxos.txt) matching the OS
-    column in the device CSV. Default is .\commands.
+    Directory used for optional per-OS Netcortex command files (commands/netcortex/<os>.txt).
+    The primary per-OS command sets are resolved from the command-group catalog in
+    lib/CollectorCore.ps1 (see Resolve-ProfileCommandList); the flat commands/<os>.txt
+    files are DEPRECATED and no longer read by the live collection path. Default is .\commands.
 
 .PARAMETER LogDirectory
     Directory where output logs will be saved. Created automatically if it doesn't exist.
@@ -171,10 +180,10 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false, HelpMessage = "Path to file with one IP per line")]
+    [Parameter(Mandatory = $false, HelpMessage = "Path to the device list: a JSON collection plan (schema_version 1) or the transitional CSV device list. Auto-detected.")]
     [string]$DeviceListFile = ".\devices.txt",
 
-    [Parameter(Mandatory = $false, HelpMessage = "Directory with per-OS command files (default: .\commands)")]
+    [Parameter(Mandatory = $false, HelpMessage = "Directory for optional Netcortex command files (commands/netcortex). Primary command sets come from the catalog in lib/CollectorCore.ps1.")]
     [string]$CommandsDirectory = ".\commands",
 
     [Parameter(Mandatory = $false)]
@@ -582,63 +591,59 @@ if ($NetcortexEnabled) {
 
 # Skip device and command loading when only compressing
 if (-not $CompressOnly) {
-    # Read device CSV (IP,OS columns with header row)
-    # Pre-filter comment lines (# prefix) and blank lines before CSV parsing
-    # so that free-form comments don't break Import-Csv column expectations.
-    $csvLines = @(Get-Content $DeviceListFile | Where-Object {
-            -not [string]::IsNullOrWhiteSpace($_) -and -not $_.TrimStart().StartsWith('#')
-        })
-    if ($csvLines.Count -le 1) {
-        # Need at least a header row + one data row
-        Write-Error "No devices found in '$DeviceListFile'."
-        exit 1
+    # Load the device list. Two input formats are accepted and auto-detected:
+    #   * a structured JSON collection plan (schema_version 1), or
+    #   * the transitional CSV device list (IP,Category,OS[,ExcludeCommands,AddCommands]).
+    # Both are parsed by the pure functions in lib/CollectorCore.ps1 into ONE
+    # normalized device shape, so the rest of the script is input-agnostic. Detection
+    # is by extension (.json) first, then a leading-'{' content sniff so a
+    # mis-extensioned plan still parses as JSON.
+    $deviceListRaw = Get-Content -LiteralPath $DeviceListFile -Raw
+    $looksJson = ($DeviceListFile -match '\.json$') -or
+                 ($null -ne $deviceListRaw -and $deviceListRaw.TrimStart().StartsWith('{'))
+    try {
+        if ($looksJson) {
+            $plan = ConvertFrom-CollectionPlanJson -Json $deviceListRaw
+        }
+        else {
+            $plan = ConvertFrom-CollectionCsv -CsvText $deviceListRaw
+        }
     }
-    $devicesCsv = @($csvLines | ConvertFrom-Csv)
-    if ($devicesCsv.Count -eq 0) {
-        Write-Error "No devices found in '$DeviceListFile'."
+    catch {
+        Write-Error "Failed to load device list '$DeviceListFile': $($_.Exception.Message)"
         exit 1
     }
 
-    # Validate required columns (Category is optional for backward compatibility)
-    $csvColumns = $devicesCsv[0].PSObject.Properties.Name
-    if ('IP' -notin $csvColumns -or 'OS' -notin $csvColumns) {
-        Write-Error "Device CSV must have 'IP' and 'OS' columns (Category is optional). Found: $($csvColumns -join ', ')"
-        exit 1
-    }
-    $hasCategory = 'Category' -in $csvColumns
-    # Optional per-device command overrides. Each field is a standard CSV cell that
-    # may hold multiple commands as a quoted, comma-separated list
-    # (e.g. "show ip route,show ip bgp"). ConvertFrom-Csv strips the quotes, so the
-    # value here is a plain comma-separated string that we split below.
-    $hasExclude  = 'ExcludeCommands' -in $csvColumns
-    $hasAdd      = 'AddCommands' -in $csvColumns
+    # Input plan identity → echoed to the v2 collection summary (round-trip contract).
+    # JSON plans carry a top-level plan_id; the CSV path leaves it $null.
+    $script:CollectionPlanId = $plan.plan_id
 
-    # Validate OS values and filter blanks/comments
+    # Map the normalized plan devices onto the device object shape the rest of the
+    # script consumes. connect_ip is the connection IP (the same role the CSV 'IP'
+    # column played). Profile + explicit Groups are carried through for catalog-based
+    # command resolution below; ExcludeCommands / AddCommands are already normalized.
     $devices = @()
-    $lineNum = 1   # header is line 1; data starts at line 2
-    foreach ($row in $devicesCsv) {
-        $lineNum++
-        $ip       = if ($row.IP) { $row.IP.Trim() } else { "" }
-        $os       = if ($row.OS) { $row.OS.Trim().ToLower() } else { "" }
-        $category = if ($hasCategory -and $row.Category) { $row.Category.Trim() } else { "" }
-        $excludeCmds = if ($hasExclude -and $row.ExcludeCommands) {
-            @($row.ExcludeCommands -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-        } else { @() }
-        $addCmds = if ($hasAdd -and $row.AddCommands) {
-            @($row.AddCommands -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-        } else { @() }
-        if ([string]::IsNullOrWhiteSpace($ip) -or $ip.StartsWith('#')) { continue }
+    foreach ($pd in $plan.devices) {
+        $ip = [string]$pd.connect_ip
+        $os = [string]$pd.platform
         if ([string]::IsNullOrWhiteSpace($os)) {
-            Write-C "ERROR: Device '$ip' on line $lineNum of '$DeviceListFile' is missing the OS field." -Color Red
-            Write-C "  Each row must have the format: IP,Category,OS  (e.g. 10.1.1.1,Switch,cisco-switch-iosxe)" -Color Red
+            Write-C "ERROR: Device '$ip' is missing the platform/OS field." -Color Red
             exit 1
         }
         if ($os -notin $validOSTypes.Keys) {
-            Write-C "ERROR: Unknown OS type '$os' for device '$ip' on line $lineNum of '$DeviceListFile'." -Color Red
+            Write-C "ERROR: Unknown OS/platform type '$os' for device '$ip'." -Color Red
             Write-C "  Valid OS types: $($validOSTypes.Keys -join ', ')" -Color Red
             exit 1
         }
-        $devices += [PSCustomObject]@{ IP = $ip; Category = $category; OS = $os; ExcludeCommands = $excludeCmds; AddCommands = $addCmds }
+        $devices += [PSCustomObject]@{
+            IP              = $ip
+            Category        = if ($pd.category) { [string]$pd.category } else { "" }
+            OS              = $os
+            Profile         = $pd.profile
+            Groups          = @($pd.groups)
+            ExcludeCommands = @($pd.exclude_commands)
+            AddCommands     = @($pd.add_commands)
+        }
     }
 
     if ($devices.Count -eq 0) {
@@ -646,10 +651,13 @@ if (-not $CompressOnly) {
         exit 1
     }
 
-    # Validate commands directory exists
-    if (-not (Test-Path $CommandsDirectory -PathType Container)) {
-        Write-Error "Commands directory not found: '$CommandsDirectory'"
-        exit 1
+    # The commands directory is now only consulted for optional Netcortex command
+    # files (commands/netcortex/<os>.txt); the primary per-OS command sets come from
+    # the catalog in lib/CollectorCore.ps1. Only warn (don't fail) when Netcortex
+    # output is requested but the directory is absent — the Netcortex loader below
+    # skips missing files gracefully.
+    if ($NetcortexEnabled -and -not (Test-Path $CommandsDirectory -PathType Container)) {
+        Write-C "WARNING: Commands directory '$CommandsDirectory' not found; no Netcortex command files will be loaded." -Color Yellow
     }
 
     # Discover unique OS types and categories from the device list
@@ -717,23 +725,27 @@ if (-not $CompressOnly) {
         }
     }
 
-    # Load per-OS command files for each OS type referenced in the (possibly filtered) device list
+    # Build the per-OS baseline command set (the 'full' profile) from the command
+    # group catalog in lib/CollectorCore.ps1. This catalog is the collect-facing
+    # source of truth in place of the deprecated flat commands/<os>.txt files. This
+    # per-OS 'full' set feeds the Netcortex merge base, the AireOS pre-flight check,
+    # and the session-doc OS breakdown; per-device command resolution below honors
+    # each device's own profile / groups / excludes / adds.
     $commandsByOS = @{}
-
     foreach ($osType in $uniqueOSTypes) {
-        $cmdFile = Join-Path $CommandsDirectory "$osType.txt"
-        if (-not (Test-Path $cmdFile -PathType Leaf)) {
-            Write-Error "Command file not found for OS '$osType': '$cmdFile'"
+        try {
+            # Resolve-ProfileCommandList already returns an array-protected [string[]]
+            # (comma operator); do NOT wrap in @() — that would nest it as @(@(...)).
+            $commandsByOS[$osType] = Resolve-ProfileCommandList -Platform $osType -ProfileName 'full'
+        }
+        catch {
+            Write-Error "Failed to resolve commands for OS '$osType': $($_.Exception.Message)"
             exit 1
         }
-        $cmds = Get-Content $cmdFile |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -ne "" -and $_ -notmatch "^\s*#" }
-        if ($cmds.Count -eq 0) {
-            Write-Error "No valid commands found in '$cmdFile'."
+        if (@($commandsByOS[$osType]).Count -eq 0) {
+            Write-Error "No commands resolved for OS '$osType' from the command-group catalog."
             exit 1
         }
-        $commandsByOS[$osType] = $cmds
     }
 
     # Load optional per-OS Netcortex command files. These define which commands
@@ -808,30 +820,65 @@ if (-not $CompressOnly) {
 
     # ---------------------------------------------
     # PER-DEVICE COMMAND RESOLUTION
-    # Apply optional per-device ExcludeCommands / AddCommands (from the device CSV) to
-    # each device's OS base command list and stash the effective list on the device
-    # object as ResolvedCommands. Warn (don't fail) on excludes that match nothing —
-    # usually a typo — and on devices left with an empty command list.
-    # ---------------------------------------------
+    # Resolve each device's effective command list from the catalog: its platform +
+    # (explicit groups OR profile) + per-device excludes/adds, via Resolve-ProfileCommandList
+    # (lib/CollectorCore.ps1). The protected 'base' group is always collected and
+    # non-removable; excludes naming a base command are ignored. The resolved list is
+    # stashed on the device object as ResolvedCommands — the identical seam the command
+    # loop already consumes. Warn (don't fail) on excludes that match nothing (usually a
+    # typo) and on devices left with an empty command list. DeviceVersion is left
+    # unspecified (newest-fallback no-op) — version-timing resolution is deferred until
+    # real version-guarded variants exist.
     $overrideCount = 0
     foreach ($device in $devices) {
-        $base = @($commandsByOS[$device.OS])
-        if ($device.ExcludeCommands.Count -gt 0 -or $device.AddCommands.Count -gt 0) { $overrideCount++ }
+        if ($device.ExcludeCommands.Count -gt 0 -or $device.AddCommands.Count -gt 0 -or
+            $device.Groups.Count -gt 0) { $overrideCount++ }
 
+        # Typo guard: warn on excludes that don't match anything in the platform's full
+        # command set. (The resolver silently ignores excludes targeting protected base
+        # commands; this warning is advisory only.)
         if ($device.ExcludeCommands.Count -gt 0) {
-            $baseSet = [System.Collections.Generic.HashSet[string]]::new(
-                [string[]]@($base | ForEach-Object { $_.Trim() }),
+            $fullSet = [System.Collections.Generic.HashSet[string]]::new(
+                [string[]]@($commandsByOS[$device.OS] | ForEach-Object { $_.Trim() }),
                 [System.StringComparer]::OrdinalIgnoreCase
             )
-            $unmatched = @($device.ExcludeCommands | Where-Object { -not $baseSet.Contains($_) })
+            $unmatched = @($device.ExcludeCommands | Where-Object { -not $fullSet.Contains(([string]$_).Trim()) })
             if ($unmatched.Count -gt 0) {
-                Write-C "WARNING: Device '$($device.IP)' excludes command(s) not found in the '$($device.OS)' list: $($unmatched -join ', ')" -Color Yellow
+                Write-C "WARNING: Device '$($device.IP)' excludes command(s) not found in the '$($device.OS)' command set: $($unmatched -join ', ')" -Color Yellow
             }
         }
 
-        $resolved = Resolve-DeviceCommandList -BaseCommands $base -ExcludeCommands $device.ExcludeCommands -AddCommands $device.AddCommands
-        if ($resolved.Count -eq 0) {
-            Write-C "WARNING: Device '$($device.IP)' has no commands left after exclusions - it will connect but run no commands." -Color Yellow
+        $versionNotes = [System.Collections.Generic.List[string]]::new()
+        try {
+            # Direct assignment (no @()): the resolver already returns an
+            # array-protected [string[]]; @() would nest it as @(@(...)).
+            $resolved = Resolve-ProfileCommandList -Platform $device.OS `
+                -ProfileName $device.Profile -Groups $device.Groups `
+                -ExcludeCommands $device.ExcludeCommands -AddCommands $device.AddCommands `
+                -VersionNotes $versionNotes
+        }
+        catch {
+            Write-C "ERROR: Device '$($device.IP)' command resolution failed: $($_.Exception.Message)" -Color Red
+            exit 1
+        }
+        foreach ($note in $versionNotes) {
+            Write-C "  NOTE ($($device.IP)): $note" -Color DarkGray
+        }
+
+        # Merge per-OS Netcortex-only commands so they are still executed during the
+        # session (they feed the Netcortex output files). Order: resolved set first,
+        # then Netcortex-only additions not already present, deduped case-insensitively.
+        if ($NetcortexEnabled -and $netcortexCommandsByOS.ContainsKey($device.OS)) {
+            $resolvedSet = [System.Collections.Generic.HashSet[string]]::new(
+                [string[]]@($resolved | ForEach-Object { $_.Trim() }),
+                [System.StringComparer]::OrdinalIgnoreCase
+            )
+            $ncAdditions = @($netcortexCommandsByOS[$device.OS] | Where-Object { -not $resolvedSet.Contains(([string]$_).Trim()) })
+            if ($ncAdditions.Count -gt 0) { $resolved = @($resolved) + $ncAdditions }
+        }
+
+        if (@($resolved).Count -eq 0) {
+            Write-C "WARNING: Device '$($device.IP)' has no commands left after resolution - it will connect but run no commands." -Color Yellow
         }
         $device | Add-Member -NotePropertyName ResolvedCommands -NotePropertyValue $resolved -Force
     }
@@ -2220,10 +2267,13 @@ function Write-DeviceResult {
 }
 
 # (task 0d) Input plan identity, echoed to the v2 collection summary (round-trip
-# contract). The structured JSON-plan input path populates this from the plan's
-# top-level `plan_id`; it stays $null on the legacy CSV path. Declared here as the
-# single wiring seam for the future JSON-plan input slice.
-$script:CollectionPlanId = $null
+# contract). The device-list load populates this from a JSON plan's top-level
+# `plan_id`; it stays $null on the legacy CSV path. In -CompressOnly mode the device
+# load is skipped entirely, so default it to $null here only when it was not already
+# set — do NOT clobber a value the load path just assigned.
+if (-not (Get-Variable -Name 'CollectionPlanId' -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:CollectionPlanId = $null
+}
 
 # Pre-build lookup maps for per-device output (used by Write-DeviceOutputFiles)
 # $deviceByIp gives the collection-summary builder access to each device's
@@ -2892,7 +2942,7 @@ if ($CollectionSummaryEnabled) {
 
     # (task 0d) v2 document via the pure builder, echoing the input plan_id
     # (round-trip contract). $CollectionPlanId is populated by the JSON-plan input
-    # path (wired in a later slice); it is $null for the legacy CSV path today.
+    # path during device-list load; it is $null for the legacy CSV path.
     $planIdForSummary = if (Get-Variable -Name 'CollectionPlanId' -Scope Script -ErrorAction SilentlyContinue) {
         $script:CollectionPlanId
     }

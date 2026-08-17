@@ -1,3 +1,9 @@
+# DEPRECATED: no longer read by the live collection path. The command-group
+# catalog in lib/CollectorCore.ps1 (Get-CommandGroupCatalog) is now the source of
+# truth for what the collector runs. Retained as the behavior-preservation
+# reference for tests/CollectionPlanIntegration.Tests.ps1 (the 'full' profile is a
+# superset of this list). Removal follow-up: when a cross-repo command-set parity
+# check exists.
 # Cisco IOS-XE Switch commands (paging disabled automatically via "terminal length 0")
 show version
 show switch
