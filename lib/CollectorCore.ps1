@@ -380,3 +380,205 @@ function ConvertFrom-CollectionCsv {
         devices        = $devices
     }
 }
+
+# =============================================================================
+# COMMAND GROUPS + PROFILES (task 0b)
+# The per-platform command sets are organized into named FEATURE GROUPS; a
+# PROFILE is a named composition of groups. A device's profile (or explicit
+# group list) resolves to its command set. This replaces the flat, per-OS
+# commands/<os>.txt files as the source of truth for *what a profile collects*.
+#
+# The 'base' group is NON-REMOVABLE: identity commands, running-config, and the
+# per-platform sentinel are always collected and cannot be dropped by a profile
+# choice or an exclude. Enforced in Resolve-ProfileCommandList.
+#
+# Forward-compat (task 0c): a group member is a plain string today. A later
+# catalog may make it an object { command; min_version; max_version } and the
+# resolver will select by firmware. See docs/collection-plan.schema.md.
+# =============================================================================
+
+# Per-platform feature-group catalog. Each platform maps to an ORDERED hashtable
+# of groupName -> [string[]] commands. Group order here is the canonical output
+# order (base first, then groups in declared order). 'base' must be present for
+# every platform.
+function Get-CommandGroupCatalog {
+    return @{
+        'cisco-switch-iosxe' = [ordered]@{
+            'base'                = @('show version', 'show inventory', 'show interface', 'show interface status', 'show switch', 'show running-config', 'show ip protocols')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'           = @('show mac address-table', 'show etherchannel summary')
+            'power'               = @('show power inline')
+            'routing-igp-ospf'    = @('show ip ospf neighbor', 'show ip ospf interface brief')
+            'routing-igp-eigrp'   = @('show ip eigrp neighbors', 'show ip eigrp topology')
+            'routing-bgp'         = @('show ip bgp summary', 'show ip bgp neighbors')
+            'routing-tables-full' = @('show ip route', 'show ip route vrf *')
+            # PLACEHOLDER (Phase-2 finalizes; private-prefix longer-prefixes queries TBD).
+            'routing-tables-lite' = @('show ip route connected', 'show ip route static', 'show ip route local', 'show ip route summary')
+            'vrf'                 = @('show vrf')
+            'arp'                 = @('show ip arp', 'show ip arp vrf all')
+            'optics-transceiver'  = @('show interface transceiver', 'show interface transceiver detail')
+            'collect-only-ops'    = @('show license all', 'show adjacency detail', 'show logging')
+        }
+        'cisco-router-iosxe' = [ordered]@{
+            'base'                = @('show version', 'show inventory', 'show interface', 'show interface description', 'show ip interface brief', 'show running-config', 'show ip protocols')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'           = @('show etherchannel summary')
+            'routing-igp-ospf'    = @('show ip ospf neighbor', 'show ip ospf interface brief')
+            'routing-igp-eigrp'   = @('show ip eigrp neighbors', 'show ip eigrp topology')
+            'routing-bgp'         = @('show ip bgp summary', 'show ip bgp neighbors')
+            'routing-tables-full' = @('show ip route', 'show ip route vrf *')
+            # PLACEHOLDER (Phase-2 finalizes).
+            'routing-tables-lite' = @('show ip route connected', 'show ip route static', 'show ip route local', 'show ip route summary')
+            'vrf'                 = @('show vrf')
+            'arp'                 = @('show ip arp')
+            'optics-transceiver'  = @('show interface transceiver')
+            'collect-only-ops'    = @('show license all', 'show adjacency detail', 'show ip nat translations', 'show ip access-lists', 'show logging last 100')
+        }
+        'cisco-switch-nxos'  = [ordered]@{
+            # NX-OS sentinel is 'show ip route summary' (no 'show ip protocols' on NX-OS).
+            'base'                = @('show version', 'show inventory', 'show interface', 'show interface status', 'show running-config', 'show ip route summary')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'           = @('show mac address-table', 'show port-channel summary')
+            'routing-igp-ospf'    = @('show ip ospf neighbor', 'show ip ospf interface brief')
+            'routing-igp-eigrp'   = @('show ip eigrp neighbors')
+            'routing-bgp'         = @('show ip bgp summary', 'show ip bgp neighbors')
+            'routing-tables-full' = @('show ip route vrf all')
+            # PLACEHOLDER (Phase-2 finalizes; NX-OS route-type filters differ from IOS).
+            'routing-tables-lite' = @('show ip route summary')
+            'vrf'                 = @('show vrf')
+            'arp'                 = @('show ip arp detail vrf all')
+            'optics-transceiver'  = @('show interface transceiver', 'show interface transceiver details')
+            'vdc'                 = @('show vdc detail')
+            'collect-only-ops'    = @('show logging last 100')
+        }
+        'cisco-router-iosxr' = [ordered]@{
+            # IOS-XR sentinel is 'show route summary'. XR uses 'show interfaces'.
+            'base'                = @('show version', 'show inventory', 'show interfaces', 'show interfaces description', 'show ipv4 interface brief', 'show running-config', 'show route summary')
+            'neighbors'           = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'routing-igp-ospf'    = @('show ospf neighbors', 'show ospf interface')
+            'routing-isis'        = @('show isis neighbors', 'show isis interface')
+            'routing-bgp'         = @('show bgp summary', 'show bgp neighbors')
+            'routing-tables-full' = @('show route', 'show route vrf all')
+            # PLACEHOLDER (Phase-2 finalizes).
+            'routing-tables-lite' = @('show route summary')
+            'vrf'                 = @('show vrf all')
+            'arp'                 = @('show arp', 'show arp vrf all')
+            'collect-only-ops'    = @('show mpls ldp neighbor', 'show platform', 'show redundancy summary', 'show environment', 'show logging')
+        }
+        'cisco-wlc-aireos'   = [ordered]@{
+            # AireOS identity is 'show sysinfo' + 'show inventory'; run-config equiv is
+            # 'show run-config commands'; interface equiv is 'show interface summary'.
+            'base'             = @('show sysinfo', 'show inventory', 'show interface summary', 'show port summary', 'show run-config commands')
+            'neighbors'        = @('show cdp neighbors detail')
+            'wireless'         = @('show ap summary', 'show wlan summary', 'show flexconnect group summary', 'show client summary')
+            'collect-only-ops' = @('show redundancy summary', 'show redundancy detail', 'show msglog')
+        }
+        'cisco-wlc-iosxe'    = [ordered]@{
+            # 9800 identity additionally includes 'show wireless client summary'.
+            'base'             = @('show startup-config | include hostname', 'show version', 'show inventory', 'show interface', 'show wireless client summary', 'show running-config')
+            'neighbors'        = @('show cdp neighbors detail', 'show lldp neighbors detail')
+            'switching'        = @('show etherchannel summary')
+            'wireless'         = @('show wireless summary', 'show ap summary', 'show ap cdp neighbors', 'show wlan summary', 'show wireless tag policy summary')
+            'collect-only-ops' = @('show chassis', 'show redundancy', 'show logging last 100')
+        }
+    }
+}
+
+# Named profiles = feature-group compositions applied ON TOP OF base (base is
+# always included regardless). The '*' sentinel means "all feature groups the
+# platform defines, except routing-tables-lite" (lite is a strict alternative to
+# routing-tables-full, so 'full' uses -full and never both). Groups a profile
+# names but a platform does not define are silently skipped (e.g. routing-isis
+# on non-XR), which is expected, not an error.
+function Get-CollectionProfileCatalog {
+    return @{
+        'full'      = '*'
+        'l2-switch' = @('switching', 'power', 'optics-transceiver', 'neighbors')
+        'l3-switch' = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-full', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
+        'router'    = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-full', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
+        'bgp-heavy' = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-lite', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
+        'wlc'       = @('wireless', 'neighbors')
+    }
+}
+
+# Resolve a device's effective command list from its platform + (profile OR
+# explicit groups) + per-device excludes/adds.
+#   - base commands always come first and are NON-REMOVABLE (an exclude naming a
+#     base command is ignored);
+#   - selected feature groups follow in the catalog's declared group order;
+#   - commands are deduped case-insensitively (first occurrence wins);
+#   - excludes/adds are then applied via the shared Resolve-DeviceCommandList.
+# Explicit -Groups (when non-empty) takes precedence over -ProfileName. Groups
+# not defined for the platform are skipped. Returns a [string[]].
+function Resolve-ProfileCommandList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [string]$ProfileName,
+        [string[]]$Groups = @(),
+        [string[]]$ExcludeCommands = @(),
+        [string[]]$AddCommands = @(),
+        $Catalog = $null,
+        $ProfileCatalog = $null
+    )
+    if ($null -eq $Catalog) { $Catalog = Get-CommandGroupCatalog }
+    if ($null -eq $ProfileCatalog) { $ProfileCatalog = Get-CollectionProfileCatalog }
+    if ($null -eq $Groups) { $Groups = @() }
+    if ($null -eq $ExcludeCommands) { $ExcludeCommands = @() }
+    if ($null -eq $AddCommands) { $AddCommands = @() }
+
+    if (-not $Catalog.Contains($Platform)) {
+        throw "Unknown platform '$Platform' — no command-group catalog entry."
+    }
+    $platGroups = $Catalog[$Platform]
+
+    # Non-base group names this platform defines (canonical order preserved).
+    $featureNames = @($platGroups.Keys | Where-Object { $_ -ne 'base' })
+
+    # Determine the selected feature-group list.
+    if ($Groups.Count -gt 0) {
+        $selected = @($Groups)
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($ProfileName)) {
+        if (-not $ProfileCatalog.Contains($ProfileName)) {
+            throw "Unknown profile '$ProfileName'. Known profiles: $(@($ProfileCatalog.Keys | Sort-Object) -join ', ')."
+        }
+        $sel = $ProfileCatalog[$ProfileName]
+        if (($sel -is [string]) -and ($sel -eq '*')) {
+            $selected = @($featureNames | Where-Object { $_ -ne 'routing-tables-lite' })
+        }
+        else {
+            $selected = @($sel)
+        }
+    }
+    else {
+        # Neither groups nor profile: default to the 'full' composition.
+        $selected = @($featureNames | Where-Object { $_ -ne 'routing-tables-lite' })
+    }
+
+    # Build base + selected-group commands in canonical order, deduped.
+    $ordered = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    $baseCmds = @()
+    if ($platGroups.Contains('base')) { $baseCmds = @($platGroups['base']) }
+    foreach ($c in $baseCmds) {
+        if ($seen.Add($c.Trim())) { $ordered.Add($c) }
+    }
+    foreach ($gName in $featureNames) {
+        if ($selected -notcontains $gName) { continue }
+        foreach ($c in @($platGroups[$gName])) {
+            if ($seen.Add($c.Trim())) { $ordered.Add($c) }
+        }
+    }
+
+    # base is NON-REMOVABLE: drop any exclude that targets a base command before
+    # applying the shared exclude/add resolver.
+    $baseSet = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]@($baseCmds | ForEach-Object { $_.Trim() }),
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $effectiveExcludes = @($ExcludeCommands | Where-Object { -not $baseSet.Contains(([string]$_).Trim()) })
+
+    return Resolve-DeviceCommandList -BaseCommands ([string[]]$ordered.ToArray()) `
+        -ExcludeCommands $effectiveExcludes -AddCommands $AddCommands
+}
