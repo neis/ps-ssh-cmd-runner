@@ -111,6 +111,8 @@ Describe 'ConvertFrom-CollectionPlanJson' {
         $d2.ssh_options.kex_algorithms | Should -Be '+dh1'
         $d2.ssh_options.pty  | Should -Be $true
         $d2.credential_group | Should -Be 'legacy'
+        # v2 singular collapses to a one-element ordered list.
+        $d2.credential_groups | Should -Be @('legacy')
     }
 
     It 'applies defaults.profile when a device gives neither profile nor groups' {
@@ -129,6 +131,7 @@ Describe 'ConvertFrom-CollectionPlanJson' {
         $json = '{ "defaults": { "credential_group": "core", "ssh_options": { "ciphers": "+cbc" } }, "devices": [ { "connect_ip": "1.2.3.4", "profile": "full" } ] }'
         $plan = ConvertFrom-CollectionPlanJson -Json $json
         $plan.devices[0].credential_group    | Should -Be 'core'
+        $plan.devices[0].credential_groups   | Should -Be @('core')
         $plan.devices[0].ssh_options.ciphers | Should -Be '+cbc'
     }
 
@@ -152,8 +155,18 @@ Describe 'ConvertFrom-CollectionPlanJson' {
         (ConvertFrom-CollectionPlanJson -Json $json).schema_version | Should -Be 1
     }
 
-    It 'throws on an unsupported schema_version' {
+    It 'accepts schema_version 1 and echoes it' {
+        $json = '{ "schema_version": 1, "devices": [ { "connect_ip": "1.2.3.4" } ] }'
+        (ConvertFrom-CollectionPlanJson -Json $json).schema_version | Should -Be 1
+    }
+
+    It 'accepts schema_version 2 and echoes it' {
         $json = '{ "schema_version": 2, "devices": [ { "connect_ip": "1.2.3.4" } ] }'
+        (ConvertFrom-CollectionPlanJson -Json $json).schema_version | Should -Be 2
+    }
+
+    It 'throws on an unsupported schema_version' {
+        $json = '{ "schema_version": 3, "devices": [ { "connect_ip": "1.2.3.4" } ] }'
         { ConvertFrom-CollectionPlanJson -Json $json } | Should -Throw -ExpectedMessage '*schema_version*'
     }
 
@@ -184,6 +197,99 @@ Describe 'ConvertFrom-CollectionPlanJson' {
     }
 }
 
+Describe 'Get-EffectiveCredentialGroups — shorthand collapse + inheritance' {
+    It 'uses an explicit ordered plural list verbatim (order preserved)' {
+        $o = [PSCustomObject]@{ credential_groups = @('primary', 'fallback', 'break-glass') }
+        $r = Get-EffectiveCredentialGroups $o
+        $r | Should -Be @('primary', 'fallback', 'break-glass')
+    }
+    It 'collapses a singular credential_group into a one-element list' {
+        $o = [PSCustomObject]@{ credential_group = 'solo' }
+        $r = Get-EffectiveCredentialGroups $o
+        $r | Should -Be @('solo')
+    }
+    It 'prefers plural over singular at the same level' {
+        $o = [PSCustomObject]@{ credential_groups = @('a', 'b'); credential_group = 'ignored' }
+        $r = Get-EffectiveCredentialGroups $o
+        $r | Should -Be @('a', 'b')
+    }
+    It 'returns the fallback when the object supplies neither form' {
+        $o = [PSCustomObject]@{ profile = 'full' }
+        $r = Get-EffectiveCredentialGroups $o @('inherited')
+        $r | Should -Be @('inherited')
+    }
+    It 'treats a present-but-empty plural list as authoritative (suppresses inheritance)' {
+        $o = [PSCustomObject]@{ credential_groups = @() }
+        $r = Get-EffectiveCredentialGroups $o @('inherited')
+        @($r).Count | Should -Be 0
+    }
+    It 'returns an empty list for a $null object with no fallback' {
+        $r = Get-EffectiveCredentialGroups $null
+        @($r).Count | Should -Be 0
+    }
+    It 'trims and drops empties inside the plural list' {
+        $o = [PSCustomObject]@{ credential_groups = @('  a ', '', '  ', 'b') }
+        $r = Get-EffectiveCredentialGroups $o
+        $r | Should -Be @('a', 'b')
+    }
+}
+
+Describe 'ConvertFrom-CollectionPlanJson — credential_groups (v2)' {
+    It 'parses an explicit ordered credential_groups and preserves order exactly' {
+        $json = '{ "schema_version": 2, "devices": [ { "connect_ip": "1.2.3.4", "credential_groups": ["primary", "fallback", "break-glass"] } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.schema_version               | Should -Be 2
+        $plan.devices[0].credential_groups | Should -Be @('primary', 'fallback', 'break-glass')
+        # back-compat singular = highest-priority (first) credential
+        $plan.devices[0].credential_group  | Should -Be 'primary'
+    }
+
+    It 'collapses a device singular credential_group into a one-element list (v1 back-compat)' {
+        $json = '{ "schema_version": 1, "devices": [ { "connect_ip": "1.2.3.4", "credential_group": "solo" } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].credential_groups | Should -Be @('solo')
+        $plan.devices[0].credential_group  | Should -Be 'solo'
+    }
+
+    It 'lets a device credential_groups override defaults.credential_groups' {
+        $json = '{ "defaults": { "credential_groups": ["def-a", "def-b"] }, "devices": [ { "connect_ip": "1.2.3.4", "credential_groups": ["dev-x"] } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].credential_groups | Should -Be @('dev-x')
+    }
+
+    It 'inherits defaults.credential_groups when the device omits both forms' {
+        $json = '{ "defaults": { "credential_groups": ["core", "core-legacy"] }, "devices": [ { "connect_ip": "1.2.3.4" } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].credential_groups | Should -Be @('core', 'core-legacy')
+        $plan.devices[0].credential_group  | Should -Be 'core'
+    }
+
+    It 'inherits a defaults singular credential_group as a one-element list' {
+        $json = '{ "defaults": { "credential_group": "core" }, "devices": [ { "connect_ip": "1.2.3.4" } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].credential_groups | Should -Be @('core')
+    }
+
+    It 'produces an empty credential list when neither defaults nor device supplies one' {
+        $json = '{ "devices": [ { "connect_ip": "1.2.3.4" } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        @($plan.devices[0].credential_groups).Count | Should -Be 0
+        $plan.devices[0].credential_group           | Should -Be $null
+    }
+
+    It 'lets a device plural override a defaults singular' {
+        $json = '{ "defaults": { "credential_group": "core" }, "devices": [ { "connect_ip": "1.2.3.4", "credential_groups": ["edge", "edge-legacy"] } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].credential_groups | Should -Be @('edge', 'edge-legacy')
+    }
+
+    It 'prefers a device plural over a device singular at the same level' {
+        $json = '{ "devices": [ { "connect_ip": "1.2.3.4", "credential_groups": ["win-a", "win-b"], "credential_group": "loser" } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].credential_groups | Should -Be @('win-a', 'win-b')
+    }
+}
+
 Describe 'ConvertFrom-CollectionCsv' {
     It 'maps every row to the default full profile and preserves category' {
         $csv = @'
@@ -199,6 +305,10 @@ IP,Category,OS
         $plan.devices[0].platform   | Should -Be 'cisco-switch-iosxe'
         $plan.devices[0].category   | Should -Be 'Access'
         $plan.devices[0].connect_ip | Should -Be '10.0.0.1'
+        # CSV carries no credentials -> empty ordered list, null singular (same
+        # normalized shape as the JSON path).
+        @($plan.devices[0].credential_groups).Count | Should -Be 0
+        $plan.devices[0].credential_group           | Should -Be $null
     }
 
     It 'lowercases the OS into platform' {
