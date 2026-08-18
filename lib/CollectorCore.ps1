@@ -158,7 +158,7 @@ function ConvertTo-SafeFileName {
 }
 
 # =============================================================================
-# COLLECTION PLAN INPUT (schema_version 1)
+# COLLECTION PLAN INPUT (schema_version 1 and 2 accepted)
 # See docs/collection-plan.schema.md. Pure parse/normalize logic for the
 # structured JSON collection plan and the transitional CSV device list. Both
 # paths emit the SAME normalized device shape so downstream resolution is
@@ -189,6 +189,34 @@ function ConvertTo-StringArray {
     if ($null -eq $Value) { return , ([string[]]@()) }
     $items = @($Value | ForEach-Object { if ($null -ne $_) { ([string]$_).Trim() } } | Where-Object { $_ -ne '' })
     return , ([string[]]$items)
+}
+
+# Resolve an ORDERED credential-group list (attempt-priority order, element 0
+# first) off a plan object level (a device or the `defaults` blob), with a
+# singular back-compat shorthand and inheritance from a fallback list:
+#   1. plural `credential_groups` present (key exists, non-null)  -> use it
+#      verbatim (order preserved). This wins over the singular at the SAME level.
+#   2. else singular `credential_group` (non-empty)               -> one-element list
+#   3. else                                                       -> $Fallback
+# An explicitly-present `credential_groups` is authoritative for that level even
+# when empty (`[]` suppresses inheritance). This is pure data-shaping — the list
+# is CARRIED into the normalized shape, NOT consumed for auth (auth still uses a
+# single credential this phase; see docs/collection-plan.schema.md, C1 v2).
+function Get-EffectiveCredentialGroups {
+    param($Object, [string[]]$Fallback = @())
+    if ($null -eq $Object) { return , ([string[]]$Fallback) }
+    # Check the property directly (not via Get-PlanProperty): an explicit empty
+    # array is "present but empty" and must suppress inheritance, whereas
+    # Get-PlanProperty collapses a $null value to the default.
+    $plural = $Object.PSObject.Properties['credential_groups']
+    if ($null -ne $plural -and $null -ne $plural.Value) {
+        return ConvertTo-StringArray $plural.Value
+    }
+    $singular = Get-PlanProperty $Object 'credential_group'
+    if (-not [string]::IsNullOrWhiteSpace([string]$singular)) {
+        return , ([string[]]@((([string]$singular).Trim())))
+    }
+    return , ([string[]]$Fallback)
 }
 
 # Normalize an ssh_options blob into the four documented fields. Missing fields
@@ -235,7 +263,7 @@ function New-CollectionPlanDevice {
         [string[]]$AddCommands = @(),
         $SshOptions = $null,
         $Priority = $null,
-        [string]$CredentialGroup,
+        [string[]]$CredentialGroups = @(),
         [string]$Category,
         [string]$PlanId
     )
@@ -248,6 +276,7 @@ function New-CollectionPlanDevice {
     if ($null -eq $Groups) { $Groups = @() }
     if ($null -eq $ExcludeCommands) { $ExcludeCommands = @() }
     if ($null -eq $AddCommands) { $AddCommands = @() }
+    if ($null -eq $CredentialGroups) { $CredentialGroups = @() }
 
     return [PSCustomObject]@{
         connect_ip       = $ConnectIp.Trim()
@@ -261,16 +290,25 @@ function New-CollectionPlanDevice {
         add_commands     = [string[]]$AddCommands
         ssh_options      = $SshOptions
         priority         = $prio
-        credential_group = if ([string]::IsNullOrWhiteSpace($CredentialGroup)) { $null } else { $CredentialGroup.Trim() }
+        # Ordered attempt-priority credential list (element 0 tried first). CARRIED
+        # for a later multi-credential phase; not consumed for auth yet.
+        credential_groups = [string[]]$CredentialGroups
+        # Back-compat singular: the highest-priority (first) credential, or $null
+        # when the list is empty. The existing single-credential auth path reads
+        # this field, so it stays the effective "one credential" this phase.
+        credential_group = if ($CredentialGroups.Count -gt 0) { $CredentialGroups[0] } else { $null }
         category         = if ([string]::IsNullOrWhiteSpace($Category)) { $null } else { $Category.Trim() }
         plan_id          = if ([string]::IsNullOrWhiteSpace($PlanId)) { $null } else { $PlanId.Trim() }
     }
 }
 
-# Parse a structured JSON collection plan (schema_version 1) into a normalized
-# object: @{ schema_version; plan_id; devices = [normalized device, ...] }.
-# Throws clear errors on malformed JSON, wrong schema_version, a missing/empty
-# devices array, or a device missing connect_ip.
+# Parse a structured JSON collection plan (schema_version 1 or 2) into a
+# normalized object: @{ schema_version; plan_id; devices = [normalized device] }.
+# schema_version is echoed as the parsed input version (1 or 2); v1 plans behave
+# identically to before (the v2 `credential_groups` list simply collapses from
+# the singular `credential_group` shorthand). Throws clear errors on malformed
+# JSON, an unsupported schema_version, a missing/empty devices array, or a device
+# missing connect_ip.
 function ConvertFrom-CollectionPlanJson {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Json)
@@ -287,14 +325,17 @@ function ConvertFrom-CollectionPlanJson {
     if ($null -eq $doc) { throw "Collection plan JSON parsed to null." }
 
     $schemaVersion = Get-PlanProperty $doc 'schema_version' 1
-    if ("$schemaVersion" -ne '1') {
-        throw "Unsupported collection plan schema_version '$schemaVersion' (this collector supports 1)."
+    if ("$schemaVersion" -ne '1' -and "$schemaVersion" -ne '2') {
+        throw "Unsupported collection plan schema_version '$schemaVersion' (this collector supports 1, 2)."
     }
+    $schemaVersionInt = [int]"$schemaVersion"
 
     $planId = Get-PlanProperty $doc 'plan_id'
     $defaults = Get-PlanProperty $doc 'defaults'
     $defaultProfile = Get-PlanProperty $defaults 'profile' 'full'
-    $defaultCredGroup = Get-PlanProperty $defaults 'credential_group'
+    # Ordered credential list at the defaults level (plural, else singular
+    # shorthand, else empty). Inherited by any device that supplies neither form.
+    $defaultCredGroups = Get-EffectiveCredentialGroups $defaults @()
     $defaultSsh = Get-PlanProperty $defaults 'ssh_options'
 
     # Check the property directly rather than via Get-PlanProperty: an empty array
@@ -321,7 +362,9 @@ function ConvertFrom-CollectionPlanJson {
         # per-field override, not wholesale replace, so a device that sets only
         # 'pty' keeps the global crypto defaults.
         $ssh = Get-PlanProperty $d 'ssh_options'
-        $cred = Get-PlanProperty $d 'credential_group' $defaultCredGroup
+        # Per-device credential list (plural, else singular shorthand) wins over
+        # the defaults list; a device that supplies neither inherits the defaults.
+        $credGroups = Get-EffectiveCredentialGroups $d $defaultCredGroups
 
         New-CollectionPlanDevice `
             -ConnectIp $ip `
@@ -332,12 +375,12 @@ function ConvertFrom-CollectionPlanJson {
             -AddCommands (ConvertTo-StringArray (Get-PlanProperty $d 'add_commands')) `
             -SshOptions (Merge-SshOptions $ssh $defaultSsh) `
             -Priority (Get-PlanProperty $d 'priority') `
-            -CredentialGroup ([string]$cred) `
+            -CredentialGroups $credGroups `
             -PlanId ([string]$planId)
     }
 
     return [PSCustomObject]@{
-        schema_version = 1
+        schema_version = $schemaVersionInt
         plan_id        = if ([string]::IsNullOrWhiteSpace([string]$planId)) { $null } else { ([string]$planId).Trim() }
         devices        = @($devices)
     }

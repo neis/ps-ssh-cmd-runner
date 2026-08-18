@@ -1,4 +1,4 @@
-# Collection Plan input schema (v1)
+# Collection Plan input schema (v2)
 
 The **collection plan** is the structured JSON input the collector
 (`ssh-cmd-runner.ps1`) consumes to decide *which devices to reach* and *what to
@@ -9,12 +9,24 @@ collect from each*. It is a strict **superset** of the legacy CSV device list
 follow-up C1) but does not define it. Any change here bumps `schema_version` and
 must be flagged for the Reperio-side validator.
 
-- **Current version:** `schema_version = 1`
+- **Current version:** `schema_version = 2`. The collector **accepts both `1` and
+  `2`**; any other value is a hard error.
 - **Parsed by:** `ConvertFrom-CollectionPlanJson` (JSON) and
   `ConvertFrom-CollectionCsv` (transitional CSV) in `lib/CollectorCore.ps1`.
 - **Round-trip contract:** `plan_id` is a passthrough. The collector echoes it in
   `collection-summary.json` (wired in Slice 2 / task 0d) so an ingest can be tied
   back to the plan that produced it.
+
+## What changed in v2
+
+v2 adds an **ordered credential list** (`credential_groups`) at both the
+`defaults` and per-device levels, keeping the v1 singular `credential_group` as a
+fully back-compatible one-element shorthand. A v1 plan (only the singular form,
+or `schema_version` omitted / `1`) behaves **identically to before**. The
+collector parses and **carries** the ordered list into its normalized device
+shape; it does **not** yet consume the list for multi-credential authentication —
+that is a deliberate later phase. This phase still authenticates with the single
+highest-priority credential (element 0).
 
 ---
 
@@ -22,7 +34,7 @@ must be flagged for the Reperio-side validator.
 
 | Field            | Type    | Required | Notes |
 |------------------|---------|----------|-------|
-| `schema_version` | integer | no       | Defaults to `1`. Only `1` is accepted today; any other value is a hard error. |
+| `schema_version` | integer | no       | Defaults to `1`. Both `1` and `2` are accepted; any other value is a hard error. |
 | `plan_id`        | string  | no       | Opaque plan identity. Echoed to every device and (Slice 2) to the summary. |
 | `defaults`       | object  | no       | Fallbacks applied to any device that omits the same field. See below. |
 | `devices`        | array   | **yes**  | One entry per device. Must be non-empty. |
@@ -31,11 +43,12 @@ must be flagged for the Reperio-side validator.
 
 Provides plan-wide fallbacks. A device-level field always wins over the default.
 
-| Field              | Type   | Notes |
-|--------------------|--------|-------|
-| `profile`          | string | Fallback profile when a device gives neither `profile` nor `groups`. If `defaults.profile` is also absent, the built-in default is `full`. |
-| `credential_group` | string | Fallback credential group. |
-| `ssh_options`      | object | Fallback SSH options (see below). |
+| Field               | Type     | Notes |
+|---------------------|----------|-------|
+| `profile`           | string   | Fallback profile when a device gives neither `profile` nor `groups`. If `defaults.profile` is also absent, the built-in default is `full`. |
+| `credential_groups` | string[] | Fallback **ordered** credential list (attempt-priority order; element 0 tried first). Inherited by any device that supplies neither `credential_groups` nor `credential_group`. |
+| `credential_group`  | string   | Back-compat one-element shorthand for `credential_groups`. If `credential_groups` is present it wins; otherwise a non-empty `credential_group` is treated as a single-element list. |
+| `ssh_options`       | object   | Fallback SSH options (see below). |
 
 ---
 
@@ -51,7 +64,8 @@ Provides plan-wide fallbacks. A device-level field always wins over the default.
 | `add_commands`     | string[]      | no       | Extra commands appended after the resolved set (deduped). |
 | `ssh_options`      | object        | no       | Per-device SSH tuning (see below). |
 | `priority`         | integer       | no       | Optional ordering hint (lower = earlier). Non-integer is a hard error. |
-| `credential_group` | string        | no       | Named credential set to authenticate with (resolved against the credential store; never inline secrets). |
+| `credential_groups`| string[]      | no       | **Ordered** list of named credential sets to try, in attempt-priority order (element 0 first). Names resolve against the credential store (Windows Credential Manager keys); never inline secrets. |
+| `credential_group` | string        | no       | Back-compat one-element shorthand for `credential_groups`. If `credential_groups` is present it wins; otherwise a non-empty `credential_group` is treated as a single-element list. |
 
 \* If a device supplies **neither** `profile` **nor** a non-empty `groups`, it
 falls back to `defaults.profile`, else the built-in default `full`.
@@ -92,6 +106,49 @@ Example — with `defaults.ssh_options = { "kex_algorithms": "+dh1",
 "ciphers": "+cbc" }` and device `ssh_options = { "pty": true }`, the device's
 effective options are `{ kex_algorithms: "+dh1", ciphers: "+cbc",
 host_key_algorithms: null, pty: true }`.
+
+---
+
+## Credential list resolution (`credential_groups` / `credential_group`)
+
+A device's **effective credential list** is an ordered `string[]` in
+attempt-priority order (element 0 is tried first). It is resolved with a two-axis
+rule — a **shorthand collapse** (plural vs. singular at one level) and a
+**precedence chain** (device vs. defaults):
+
+1. **Shorthand collapse (per level).** At either the device or the `defaults`
+   level, `credential_groups` (plural) wins over `credential_group` (singular)
+   when both are present. When only the singular is present, it collapses to a
+   **one-element list**. A `credential_groups` key that is **present but empty**
+   (`[]`) is authoritative for that level — it means "no credentials here", and it
+   **suppresses inheritance** (it does not fall through to the singular or to
+   defaults).
+2. **Precedence chain (device over defaults).** The device's resolved list (from
+   step 1) is used **if the device supplies either form**; otherwise the device
+   **inherits** the `defaults` resolved list; if neither the device nor
+   `defaults` supplies any credential, the effective list is **empty**.
+
+Order is preserved **exactly** as written — the collector does not sort, dedupe,
+or reorder the list.
+
+This phase **carries** the resolved list into the normalized device shape but
+does **not** consume it for authentication. Auth still uses the single
+highest-priority credential (the first element), exposed for back-compat as the
+normalized device's singular `credential_group`. Multi-credential attempt logic
+is a deliberate later phase.
+
+Examples:
+
+- device `{ "credential_groups": ["primary", "fallback"] }` → effective
+  `["primary", "fallback"]`.
+- device `{ "credential_group": "solo" }` → effective `["solo"]` (singular
+  collapse).
+- `defaults { "credential_groups": ["a", "b"] }`, device omits both → effective
+  `["a", "b"]` (inherited).
+- `defaults { "credential_group": "core" }`, device
+  `{ "credential_groups": ["edge"] }` → effective `["edge"]` (device overrides
+  defaults).
+- neither `defaults` nor device supplies any → effective `[]`.
 
 ---
 
@@ -180,7 +237,7 @@ change:
   ships in Slice 2 with a synthetic archetype (IOS-XE 17.2 syntax change) covered
   by the tests.
 - **Richer summary round-trip (task 0d):** `plan_id` (and, later, per-device
-  `priority` / `credential_group` / `ssh_options`) already ride on the plan so the
+  `priority` / `credential_groups` / `ssh_options`) already ride on the plan so the
   v2 `collection-summary.json` can echo them.
 
 ---
@@ -189,10 +246,10 @@ change:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "plan_id": "acme-refresh-2026-08-17-001",
   "defaults": {
-    "credential_group": "core-network",
+    "credential_groups": ["core-network", "core-network-legacy"],
     "profile": "full"
   },
   "devices": [
@@ -213,11 +270,18 @@ change:
         "host_key_algorithms": "+ssh-rsa",
         "pty": true
       },
-      "credential_group": "legacy-edge"
+      "credential_groups": ["legacy-edge", "core-network"]
     }
   ]
 }
 ```
 
-In the second device, `exclude_commands: ["show running-config"]` is ignored
-because `show running-config` is a base command.
+- The first device omits any credential form, so it **inherits**
+  `defaults.credential_groups` → `["core-network", "core-network-legacy"]`.
+- The second device's `credential_groups` → `["legacy-edge", "core-network"]`
+  overrides the defaults. Its `exclude_commands: ["show running-config"]` is
+  ignored because `show running-config` is a base command.
+
+A v1 plan expressing the same intent with the singular shorthand
+(`"schema_version": 1`, `"credential_group": "core-network"`) is still accepted
+and collapses to the one-element list `["core-network"]`.
