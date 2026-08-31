@@ -13,12 +13,12 @@
 
 .PARAMETER DeviceListFile
     Path to the device list. Two formats are accepted and auto-detected:
-      * A structured JSON collection plan (schema_version 1) — parsed by
+      * A structured JSON collection plan (schema_version 1) - parsed by
         ConvertFrom-CollectionPlanJson (lib/CollectorCore.ps1). Carries per-device
         platform, collection profile / feature groups, exclude/add commands, and a
         top-level plan_id echoed to the collection summary.
       * The transitional CSV device list (IP,Category,OS[,ExcludeCommands,AddCommands])
-        with a header row — parsed by ConvertFrom-CollectionCsv, mapped to the 'full'
+        with a header row - parsed by ConvertFrom-CollectionCsv, mapped to the 'full'
         profile. Blank lines and comment (#) lines are ignored.
     Detection is by extension (.json) and by a leading-'{' content sniff.
 
@@ -49,7 +49,7 @@
     with NO new output before giving up on a command. The deadline resets every time
     the device sends another line, so a command producing very large output (e.g.
     "show ip route" on a BGP router with full provider tables) can stream for as long
-    as it likes and still complete — only a genuine stall trips the timeout. Because
+    as it likes and still complete - only a genuine stall trips the timeout. Because
     it measures the gap between lines rather than total duration, this can stay small
     (default 30). It must exceed the longest expected quiet gap, including any time the
     device spends computing before it emits the first byte of output. Valid range: 5-900.
@@ -104,8 +104,8 @@
 .PARAMETER CollectionSummaryEnabled
     Enable or disable the persistent collection summary JSON written to JsonDirectory. This is
     a single, consistently-named file (see CollectionSummaryFile) that rolls up every device in
-    the run — category, IP, OS, status, duration, hostname, reason, per-command status, and the
-    excluded/added commands — including devices that failed, were skipped, or cancelled and thus
+    the run - category, IP, OS, status, duration, hostname, reason, per-command status, and the
+    excluded/added commands - including devices that failed, were skipped, or cancelled and thus
     have no per-device JSON. It MERGES across runs (upserting devices by IP, upgrade-only so a
     worse re-run never overwrites a better result) and is archived/removed with JsonDirectory
     when DeleteAfterCompress deletes it. Independent of JsonEnabled. Default is $true.
@@ -429,7 +429,7 @@ if (Test-Path $configPath -PathType Leaf) {
     if (-not $PSBoundParameters.ContainsKey('CompressWhen')) { $CompressWhen = $config.CompressWhen }
     if (-not $PSBoundParameters.ContainsKey('DeleteAfterCompress')) { $DeleteAfterCompress = [bool]$config.DeleteAfterCompress }
 
-    # Optional keys — not required in config.json for backward compatibility
+    # Optional keys - not required in config.json for backward compatibility
     if (-not $PSBoundParameters.ContainsKey('MaxParallelJobs') -and $config.PSObject.Properties.Name -contains 'MaxParallelJobs') {
         $MaxParallelJobs = [int]$config.MaxParallelJobs
     }
@@ -451,7 +451,7 @@ if (Test-Path $configPath -PathType Leaf) {
 }
 
 # ---------------------------------------------
-# UPDATE CONFIG — compare user's config.json against example and backfill missing keys
+# UPDATE CONFIG - compare user's config.json against example and backfill missing keys
 # ---------------------------------------------
 if ($UpdateConfig) {
     $examplePath = Join-Path $_scriptRoot "Examples/[example] config.json"
@@ -527,7 +527,7 @@ $ErrorActionPreference = "Stop"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 # Start a runtime transcript to capture all console output.
-# Survives force-closed PowerShell windows — the transcript is flushed incrementally.
+# Survives force-closed PowerShell windows - the transcript is flushed incrementally.
 $runtimeLogDir = Join-Path $_scriptRoot "runtime-logs"
 if (-not (Test-Path $runtimeLogDir)) { New-Item -ItemType Directory -Path $runtimeLogDir -Force | Out-Null }
 $transcriptPath = Join-Path $runtimeLogDir "runtime-${timestamp}.log"
@@ -614,7 +614,7 @@ if (-not $CompressOnly) {
         exit 1
     }
 
-    # Input plan identity → echoed to the v2 collection summary (round-trip contract).
+    # Input plan identity -> echoed to the v2 collection summary (round-trip contract).
     # JSON plans carry a top-level plan_id; the CSV path leaves it $null.
     $script:CollectionPlanId = $plan.plan_id
 
@@ -654,7 +654,7 @@ if (-not $CompressOnly) {
     # The commands directory is now only consulted for optional Netcortex command
     # files (commands/netcortex/<os>.txt); the primary per-OS command sets come from
     # the catalog in lib/CollectorCore.ps1. Only warn (don't fail) when Netcortex
-    # output is requested but the directory is absent — the Netcortex loader below
+    # output is requested but the directory is absent - the Netcortex loader below
     # skips missing files gracefully.
     if ($NetcortexEnabled -and -not (Test-Path $CommandsDirectory -PathType Container)) {
         Write-C "WARNING: Commands directory '$CommandsDirectory' not found; no Netcortex command files will be loaded." -Color Yellow
@@ -664,7 +664,7 @@ if (-not $CompressOnly) {
     $uniqueOSTypes    = @($devices | ForEach-Object { $_.OS } | Sort-Object -Unique)
     $uniqueCategories = @($devices | ForEach-Object { $_.Category } | Where-Object { $_ -ne "" } | Sort-Object -Unique)
 
-    # Interactive two-step device menu (Category → OS type)
+    # Interactive two-step device menu (Category -> OS type)
     if ($DeviceMenu) {
         $showCatMenu = $uniqueCategories.Count -gt 1
         $showOSMenu  = $uniqueOSTypes.Count -gt 1
@@ -735,7 +735,7 @@ if (-not $CompressOnly) {
     foreach ($osType in $uniqueOSTypes) {
         try {
             # Resolve-ProfileCommandList already returns an array-protected [string[]]
-            # (comma operator); do NOT wrap in @() — that would nest it as @(@(...)).
+            # (comma operator); do NOT wrap in @() - that would nest it as @(@(...)).
             $commandsByOS[$osType] = Resolve-ProfileCommandList -Platform $osType -ProfileName 'full'
         }
         catch {
@@ -824,10 +824,10 @@ if (-not $CompressOnly) {
     # (explicit groups OR profile) + per-device excludes/adds, via Resolve-ProfileCommandList
     # (lib/CollectorCore.ps1). The protected 'base' group is always collected and
     # non-removable; excludes naming a base command are ignored. The resolved list is
-    # stashed on the device object as ResolvedCommands — the identical seam the command
+    # stashed on the device object as ResolvedCommands - the identical seam the command
     # loop already consumes. Warn (don't fail) on excludes that match nothing (usually a
     # typo) and on devices left with an empty command list. DeviceVersion is left
-    # unspecified (newest-fallback no-op) — version-timing resolution is deferred until
+    # unspecified (newest-fallback no-op) - version-timing resolution is deferred until
     # real version-guarded variants exist.
     $overrideCount = 0
     foreach ($device in $devices) {
@@ -888,7 +888,7 @@ if (-not $CompressOnly) {
 }
 
 # ---------------------------------------------
-# CREDENTIAL MANAGER (Windows native P/Invoke — no external modules)
+# CREDENTIAL MANAGER (Windows native P/Invoke - no external modules)
 # Must be defined before the credential management block that calls it.
 # ---------------------------------------------
 if (-not ([System.Management.Automation.PSTypeName]'CredentialManager').Type) {
@@ -963,7 +963,7 @@ public static class CredentialManager {
 
     public static bool DeleteCredential(string target) {
         IntPtr ptr;
-        if (!CredRead(target, 1, 0, out ptr)) return true;  // already absent — nothing to do
+        if (!CredRead(target, 1, 0, out ptr)) return true;  // already absent - nothing to do
         CredFree(ptr);
         return CredDelete(target, 1, 0);
     }
@@ -1004,7 +1004,7 @@ if (-not $CompressOnly) {
     if ($storedUsername -and $null -ne $storedPassword -and -not $ClearCredentials) {
         $username = $storedUsername
         $password = $storedPassword
-        $credentialsSaved = $true   # already in Credential Manager — no re-save needed
+        $credentialsSaved = $true   # already in Credential Manager - no re-save needed
         Write-C "Using stored credentials for '$username' (label: $CredentialLabel)." -Color Cyan
     }
     else {
@@ -1015,7 +1015,7 @@ if (-not $CompressOnly) {
         }
         $username = $credential.UserName
         $password = $credential.GetNetworkCredential().Password
-        $credentialsSaved = $false  # freshly entered — save after first verified success
+        $credentialsSaved = $false  # freshly entered - save after first verified success
     }
 
     # ---------------------------------------------
@@ -1029,7 +1029,7 @@ if (-not $CompressOnly) {
     New-Item -ItemType Directory -Path $askPassDir -Force | Out-Null
     $askPassScript = Join-Path $askPassDir "askpass.cmd"
     Set-AskPassScript -ScriptPath $askPassScript -Password $password
-}   # end if (-not $CompressOnly) — credential management
+}   # end if (-not $CompressOnly) - credential management
 
 # ---------------------------------------------
 # HELPER FUNCTION: Read stdout lines from a ConcurrentQueue until a device
@@ -1040,13 +1040,13 @@ if (-not $CompressOnly) {
 # idle timeout: the deadline is pushed forward on every data line received, so the
 # call only fails after TimeoutMs elapses with NO new data. Used for per-command
 # reads so large streaming output (e.g. a full BGP route table) can complete.
-# When a prompt is found it is NOT written to Builder — instead it is returned
+# When a prompt is found it is NOT written to Builder - instead it is returned
 # via the [ref] $PromptText parameter so the caller can join it with the
 # echoed command that follows, reproducing the natural "hostname#command" layout.
 #
 # Optional interactive prompt handling:
-#   $StdIn            — the process stdin stream (for writing auto-responses)
-#   $InteractiveRegex — compiled regex matching mid-command prompts (e.g. WLC
+#   $StdIn            - the process stdin stream (for writing auto-responses)
+#   $InteractiveRegex - compiled regex matching mid-command prompts (e.g. WLC
 #                       pagination "(y/n)"). When a dequeued line matches, "y"
 #                       is written to stdin and the line is discarded (not logged).
 # ---------------------------------------------
@@ -1064,7 +1064,7 @@ function Read-UntilPrompt {
         [switch]$InactivityTimeout
     )
 
-    # Known fatal SSH error patterns — if any appear in stderr, fail immediately
+    # Known fatal SSH error patterns - if any appear in stderr, fail immediately
     # instead of waiting the full timeout.
     $fatalSshPatterns = @(
         'Unable to negotiate',
@@ -1086,7 +1086,7 @@ function Read-UntilPrompt {
     )
     $fatalSshRegex = ($fatalSshPatterns -join '|')
 
-    # ANSI escape sequence pattern — safety strip for any sequences that
+    # ANSI escape sequence pattern - safety strip for any sequences that
     # leak through the runspace's cleaning pass (e.g. split across reads).
     $ansiPattern = '\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[\x20-\x2F][\x30-\x7E]|\x1b.'
 
@@ -1105,7 +1105,7 @@ function Read-UntilPrompt {
             # (e.g. sequences split across read boundaries).
             $line = $line -replace $ansiPattern, ''
             if ($PromptRegex.IsMatch($line.TrimEnd())) {
-                # Hold the prompt — do NOT append it to Builder yet.
+                # Hold the prompt - do NOT append it to Builder yet.
                 # The caller will prepend it to the echoed command line.
                 if ($null -ne $PromptText) { $PromptText.Value = $line.TrimEnd() }
                 return $true
@@ -1124,7 +1124,7 @@ function Read-UntilPrompt {
             if ($null -ne $InteractiveRegex -and $null -ne $StdIn -and $InteractiveRegex.IsMatch($line.TrimEnd())) {
                 $StdIn.WriteLine("y")
                 $StdIn.Flush()
-                # Don't append to Builder — keep pagination prompts out of the log.
+                # Don't append to Builder - keep pagination prompts out of the log.
                 # Reset deadline since the device is actively sending data.
                 $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
                 continue
@@ -1133,7 +1133,7 @@ function Read-UntilPrompt {
             # Inactivity (idle) timeout: as long as the device keeps streaming data,
             # push the deadline forward so TimeoutMs is a max gap BETWEEN lines rather
             # than a total wait. Lets arbitrarily large output complete while still
-            # failing fast on a true stall. Opt-in — only the per-command read sets this.
+            # failing fast on a true stall. Opt-in - only the per-command read sets this.
             if ($InactivityTimeout) { $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs) }
         }
         else {
@@ -1162,7 +1162,7 @@ function Read-UntilPrompt {
                 # Vendor-agnostic auth failure detection: some devices (e.g. Cisco IOS)
                 # never emit "Permission denied" but call SSH_ASKPASS for each password
                 # attempt. Two or more read_passphrase calls means the first password
-                # was rejected and SSH requested another — definitive auth failure.
+                # was rejected and SSH requested another - definitive auth failure.
                 $askpassCount = ([regex]::Matches($stderrContent, 'read_passphrase')).Count
                 if ($askpassCount -ge 2) {
                     if ($null -ne $PromptText) { $PromptText.Value = "" }
@@ -1358,7 +1358,7 @@ function Invoke-SSHSession {
             $stdOutBuilder = [System.Text.StringBuilder]::new()
             $stdErrBuilder = [System.Text.StringBuilder]::new()
 
-            # Stderr stays on async events (SSH diagnostics — ordering doesn't matter)
+            # Stderr stays on async events (SSH diagnostics - ordering doesn't matter)
             $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
                 if ($null -ne $EventArgs.Data) {
                     $Event.MessageData.AppendLine($EventArgs.Data)
@@ -1393,7 +1393,7 @@ function Invoke-SSHSession {
                     [System.Text.RegularExpressions.RegexOptions]::Compiled
                 )
             }
-            # Compiled pager prompt regex — detects bare ":" from more/less pager in login banners.
+            # Compiled pager prompt regex - detects bare ":" from more/less pager in login banners.
             # When matched during initial prompt wait, sends a Space keypress to page through.
             $pagerRegex = [System.Text.RegularExpressions.Regex]::new(
                 '^\s*:\s*$',
@@ -1490,14 +1490,14 @@ function Invoke-SSHSession {
             }
 
             if (-not $usePTY -and $ptyAttempt -eq 0) {
-                # Phase 1: Quick check (up to 3s) — enough for stty error to appear in stderr.
+                # Phase 1: Quick check (up to 3s) - enough for stty error to appear in stderr.
                 # If the prompt arrives quickly, we proceed immediately.
                 $quickMs = [Math]::Min(3000, $initialTimeoutMs)
                 $promptFound = Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs $quickMs -PromptText ([ref]$lastPrompt) `
                     -StdIn $proc.StandardInput -PagerRegex $pagerRegex -StdErrBuilder $stdErrBuilder
 
                 if (-not $promptFound) {
-                    # Check stderr for stty failure — indicates device requires PTY allocation.
+                    # Check stderr for stty failure - indicates device requires PTY allocation.
                     # Different SSH/OS combos produce different error messages:
                     #   "stty: ... Inappropriate ioctl for device"  (Linux/macOS)
                     #   "stty: standard input: Invalid argument"    (NX-OS, some others)
@@ -1507,7 +1507,7 @@ function Invoke-SSHSession {
                         continue   # finally cleans up this attempt, loop retries with -tt
                     }
 
-                    # Universal newline nudge — some devices (ISR routers, certain IOS-XE
+                    # Universal newline nudge - some devices (ISR routers, certain IOS-XE
                     # platforms) wait for a keypress after the MOTD before showing the prompt.
                     # Send a blank line as a nudge, then continue waiting. Harmless on devices
                     # that already showed their prompt (IOS just redisplays the prompt).
@@ -1573,7 +1573,7 @@ function Invoke-SSHSession {
 
                 # Update the shared holder so the already-running reader runspace picks up
                 # the tighter pattern on its next character iteration.
-                # Always include the broad WLC pattern — hostname can't be extracted from
+                # Always include the broad WLC pattern - hostname can't be extracted from
                 # WLC prompts, so the parenthesized pattern stays broad throughout the session.
                 $regexHolder[0] = "(?:^\S*?@$hn[>#:`$%]|^$hn(?:\([A-Za-z0-9/_-]*\))?[#>]|^\([^)]+\)\s*>|^[A-Za-z]+(?:/[A-Za-z0-9]+)+:$hn(?:\([A-Za-z0-9/_-]*\))?[#>])\s*`$"
 
@@ -1584,7 +1584,7 @@ function Invoke-SSHSession {
                 )
             }
             # If hostname extraction failed, $promptRegex and $regexHolder[0] remain the
-            # broad patterns — behaviour is identical to before, which is the correct fallback.
+            # broad patterns - behaviour is identical to before, which is the correct fallback.
 
             # When PTY is allocated, the remote terminal has echo enabled by default.
             # Suppress it now so subsequent commands don't echo back through the PTY,
@@ -1636,13 +1636,13 @@ function Invoke-SSHSession {
                         $stdOutBuilder.AppendLine($drainLine) | Out-Null
                     }
                     else {
-                        # Non-prompt content — shouldn't happen between commands, but
+                        # Non-prompt content - shouldn't happen between commands, but
                         # log it so it isn't silently lost.
                         $stdOutBuilder.AppendLine($drainLine) | Out-Null
                     }
                 }
 
-                # (task 0d) Per-command wall-clock start. Additive timestamp only —
+                # (task 0d) Per-command wall-clock start. Additive timestamp only -
                 # measures send -> prompt-complete for the summary's per-command
                 # `duration`; does not touch the reader runspace or prompt timing.
                 $cmdStartTime = [DateTime]::UtcNow
@@ -1687,7 +1687,7 @@ function Invoke-SSHSession {
 
                     if ($probeFound -and -not $proc.HasExited) {
                         # The command had in fact completed. The newline flushed the reader's
-                        # stuck final line — which typically has the prompt glued to its end —
+                        # stuck final line - which typically has the prompt glued to its end -
                         # and then produced a clean prompt. De-glue that final line so the
                         # captured output is clean for downstream parsers, then treat this as a
                         # normal success (not a timeout, not a Warning).
@@ -1739,7 +1739,7 @@ function Invoke-SSHSession {
                         }
 
                         # A null-sentinel resync (stream closed) reports success but the
-                        # process is gone — treat an exited process as unrecoverable.
+                        # process is gone - treat an exited process as unrecoverable.
                         if (-not $resynced -or $proc.HasExited) {
                             # Unrecoverable session (device hung or connection dead). Attempt a
                             # best-effort graceful logout FIRST so the device reaps its VTY
@@ -1761,7 +1761,7 @@ function Invoke-SSHSession {
                             throw "Timed out waiting for device prompt after command '$cmd'."
                         }
 
-                        # Resynced — emit the standard prompt separators and move on. The
+                        # Resynced - emit the standard prompt separators and move on. The
                         # drain-stale-prompts step at the top of the next iteration cleans up
                         # any extra prompt echoes produced by the resync.
                         $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
@@ -1789,7 +1789,7 @@ function Invoke-SSHSession {
                 # Repeat the prompt twice as visual separators between command blocks.
                 # Using the actual prompt (rather than blank lines) means every non-blank
                 # line in the output section is either a prompt, a command echo, or device
-                # output — making the log straightforward to parse programmatically later.
+                # output - making the log straightforward to parse programmatically later.
                 $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
                 $stdOutBuilder.AppendLine($lastPrompt) | Out-Null
             }
@@ -1798,7 +1798,7 @@ function Invoke-SSHSession {
             # the log ends exactly as a real terminal session would.
             if ($lastPrompt -ne "") { $stdOutBuilder.AppendLine($lastPrompt) | Out-Null }
 
-            # With PTY (-tt), closing stdin does NOT cause the remote session to end —
+            # With PTY (-tt), closing stdin does NOT cause the remote session to end -
             # the PTY keeps the shell alive indefinitely. Send the OS-specific exit
             # sequence to cleanly close the remote CLI session before closing stdin.
             # For AireOS WLC: "logout" then "n" (decline save-config prompt).
@@ -1815,14 +1815,14 @@ function Invoke-SSHSession {
             Read-UntilPrompt -Queue $lineQueue -Builder $stdOutBuilder -PromptRegex $promptRegex -TimeoutMs ([Math]::Min($perCmdTimeoutMs, 5000)) -PromptText ([ref]$null) | Out-Null
 
             # Wait for the SSH process to exit. Use a fixed short timeout rather than
-            # one proportional to commands — all commands have already completed at this
+            # one proportional to commands - all commands have already completed at this
             # point, so only a brief window is needed for the process to close cleanly.
             $postSessionTimeoutMs = 3000
             $exited = $proc.WaitForExit($postSessionTimeoutMs)
 
             if (-not $exited) {
                 # All commands completed successfully; the process just didn't exit
-                # cleanly (common with PTY sessions). Kill it — this is not an error.
+                # cleanly (common with PTY sessions). Kill it - this is not an error.
                 # Guard against a race where it exits between WaitForExit and Kill.
                 try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
                 Write-Verbose "SSH process on $IPAddress did not exit within 3s after session end - killed."
@@ -1838,14 +1838,14 @@ function Invoke-SSHSession {
             $stdErr = $stdErrBuilder.ToString().Trim()
 
             # Determine success or failure.
-            # A non-zero exit code alone does not mean failure — some devices (e.g. AireOS
+            # A non-zero exit code alone does not mean failure - some devices (e.g. AireOS
             # WLC "logout") close the connection in a way that produces SSH exit code -1
             # even though all commands completed successfully. If every command ran and
             # returned a prompt, the session is successful regardless of SSH exit code.
             $allCommandsRan = ($result.CommandResults.Count -eq $CommandList.Count)
             if ($timedOutCommands.Count -gt 0) {
                 # Session completed but one or more commands stalled and were recovered.
-                # Partial success — surface the timed-out commands in the reason column.
+                # Partial success - surface the timed-out commands in the reason column.
                 $result.Status = "Warning"
                 $result.Error = "Commands timed out during processing: " + ($timedOutCommands -join ", ")
             }
@@ -1929,7 +1929,7 @@ function Invoke-SSHSession {
                 pty_retried   = ($ptyAttempt -gt 0)
             }
 
-            break   # Success — exit the PTY retry loop
+            break   # Success - exit the PTY retry loop
         }
         catch {
             $result.Status = "Failed"
@@ -1949,7 +1949,7 @@ function Invoke-SSHSession {
                 $result.Error = if ($authErrLines) { $authErrLines[-1] } else { "Authentication failed" }
             }
             elseif ($timedOutCommands.Count -gt 0) {
-                # Failure originated from an unrecoverable command timeout — name the
+                # Failure originated from an unrecoverable command timeout - name the
                 # timed-out command(s) rather than the generic "timed out" throw message.
                 $result.Error = "Commands timed out during processing: " + ($timedOutCommands -join ", ")
             }
@@ -1984,7 +1984,7 @@ function Invoke-SSHSession {
                 $failLines += $stdOutBuilder.ToString()
             }
 
-            # Always append SSH diagnostics when available — critical for troubleshooting
+            # Always append SSH diagnostics when available - critical for troubleshooting
             # any failure, including auth failures, host-key errors, and connectivity issues.
             if (-not [string]::IsNullOrWhiteSpace($catchStdErr)) {
                 $failLines += ""
@@ -1996,7 +1996,7 @@ function Invoke-SSHSession {
                 Set-Content -Path $logFilePath -Value ($failLines -join "`r`n") -Encoding UTF8
             }
 
-            break   # Error handled — exit the PTY retry loop
+            break   # Error handled - exit the PTY retry loop
         }
         finally {
             # Per-iteration cleanup: release process, event, and runspace resources.
@@ -2035,7 +2035,7 @@ function Invoke-SSHSession {
 }
 
 # ---------------------------------------------
-# COMPRESS-ONLY MODE — archive existing output and exit
+# COMPRESS-ONLY MODE - archive existing output and exit
 # Placed after function definitions so Invoke-CompressOutput is available.
 # ---------------------------------------------
 if ($CompressOnly) {
@@ -2270,7 +2270,7 @@ function Write-DeviceResult {
 # contract). The device-list load populates this from a JSON plan's top-level
 # `plan_id`; it stays $null on the legacy CSV path. In -CompressOnly mode the device
 # load is skipped entirely, so default it to $null here only when it was not already
-# set — do NOT clobber a value the load path just assigned.
+# set - do NOT clobber a value the load path just assigned.
 if (-not (Get-Variable -Name 'CollectionPlanId' -Scope Script -ErrorAction SilentlyContinue)) {
     $script:CollectionPlanId = $null
 }
@@ -2292,7 +2292,7 @@ foreach ($d in $devices) {
 function Write-DeviceOutputFiles {
     param([PSCustomObject]$Result)
     # Warning devices ran to completion (with placeholders for timed-out commands),
-    # so their per-device output is still written — the placeholders keep partial,
+    # so their per-device output is still written - the placeholders keep partial,
     # garbled command output out of the JSON/Netcortex files.
     if ($Result.Status -ne "Success" -and $Result.Status -ne "Warning") { return }
 
@@ -2304,7 +2304,7 @@ function Write-DeviceOutputFiles {
         $deviceJsonName = "${safeDevice}_${safeIP}_${timestamp}.json"
         $devicePath = Join-Path $JsonDirectory $deviceJsonName
         # Record the leaf filename on the result so the collection summary can point to it
-        # (bare name, no path — the files are transferred between machines).
+        # (bare name, no path - the files are transferred between machines).
         $Result.JsonFile = $deviceJsonName
         $deviceDoc = [ordered]@{
             name      = $Result.DeviceName
@@ -2358,7 +2358,7 @@ function Write-DeviceOutputFiles {
 
 if ($MaxParallelJobs -le 1) {
     # -----------------------------------------------------------------
-    # SEQUENTIAL MODE — table output, devices processed one at a time
+    # SEQUENTIAL MODE - table output, devices processed one at a time
     # -----------------------------------------------------------------
     Write-DeviceTableHeader
 
@@ -2444,7 +2444,7 @@ if ($MaxParallelJobs -le 1) {
 }
 else {
     # -----------------------------------------------------------------
-    # PARALLEL MODE — RunspacePool-based concurrent device processing
+    # PARALLEL MODE - RunspacePool-based concurrent device processing
     # -----------------------------------------------------------------
     Write-C "Starting parallel execution ($MaxParallelJobs concurrent jobs)..." -Color Cyan
     Write-Host ""
@@ -2723,7 +2723,7 @@ else {
             }
         }
 
-        # Auth abort — cancel running jobs and drain queue
+        # Auth abort - cancel running jobs and drain queue
         if ($authAbort) {
             foreach ($job in ($jobs | Where-Object { -not $_.Completed })) {
                 try { $job.PowerShell.Stop() } catch {}
@@ -2833,7 +2833,7 @@ if ($JsonEnabled -and $JsonSessionFileEnabled) {
 # failed/skipped/cancelled devices that have no per-device JSON), plus per-command
 # status and each device's excluded/added commands. It lives in JsonDirectory and
 # MERGES across runs: each run upserts its devices by IP so re-running a subset (to
-# fix failures/warnings) updates only those entries. The merge is upgrade-only — a
+# fix failures/warnings) updates only those entries. The merge is upgrade-only - a
 # worse result never overwrites a better stored one. It is archived and removed with
 # the rest of JsonDirectory when -DeleteAfterCompress deletes the dir, so the next
 # collection naturally starts fresh.

@@ -40,7 +40,7 @@ Describe 'ConvertTo-NormalizedSshOptions' {
     }
 }
 
-Describe 'Merge-SshOptions — field-level merge over defaults' {
+Describe 'Merge-SshOptions - field-level merge over defaults' {
     It 'inherits the default sub-fields the device omits (device sets only pty)' {
         $def = [PSCustomObject]@{ kex_algorithms = '+dh1'; ciphers = '+cbc' }
         $dev = [PSCustomObject]@{ pty = $true }
@@ -197,7 +197,7 @@ Describe 'ConvertFrom-CollectionPlanJson' {
     }
 }
 
-Describe 'Get-EffectiveCredentialGroups — shorthand collapse + inheritance' {
+Describe 'Get-EffectiveCredentialGroups - shorthand collapse + inheritance' {
     It 'uses an explicit ordered plural list verbatim (order preserved)' {
         $o = [PSCustomObject]@{ credential_groups = @('primary', 'fallback', 'break-glass') }
         $r = Get-EffectiveCredentialGroups $o
@@ -234,7 +234,7 @@ Describe 'Get-EffectiveCredentialGroups — shorthand collapse + inheritance' {
     }
 }
 
-Describe 'ConvertFrom-CollectionPlanJson — credential_groups (v2)' {
+Describe 'ConvertFrom-CollectionPlanJson - credential_groups (v2)' {
     It 'parses an explicit ordered credential_groups and preserves order exactly' {
         $json = '{ "schema_version": 2, "devices": [ { "connect_ip": "1.2.3.4", "credential_groups": ["primary", "fallback", "break-glass"] } ] }'
         $plan = ConvertFrom-CollectionPlanJson -Json $json
@@ -355,7 +355,7 @@ IP,OS
     }
 }
 
-Describe 'Canonical platform shape — JSON and CSV agree (lowercase)' {
+Describe 'Canonical platform shape - JSON and CSV agree (lowercase)' {
     It 'lowercases a mixed-case platform from the JSON path' {
         $json = '{ "devices": [ { "connect_ip": "1.2.3.4", "platform": "Cisco-Switch-IOSXE" } ] }'
         (ConvertFrom-CollectionPlanJson -Json $json).devices[0].platform | Should -Be 'cisco-switch-iosxe'

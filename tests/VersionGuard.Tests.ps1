@@ -90,7 +90,7 @@ Cisco IOS Software [Amsterdam], Catalyst L3 Switch Software
     }
 }
 
-Describe 'Resolve-CommandVariant — plain and unconditional members' {
+Describe 'Resolve-CommandVariant - plain and unconditional members' {
     It 'returns a plain string member verbatim (unversioned)' {
         $r = Resolve-CommandVariant -Platform 'cisco-switch-iosxe' -Member 'show version'
         $r.command | Should -Be 'show version'
@@ -104,7 +104,7 @@ Describe 'Resolve-CommandVariant — plain and unconditional members' {
     }
 }
 
-Describe 'Resolve-CommandVariant — archetype: IOS-XE syntax change at 17.2' {
+Describe 'Resolve-CommandVariant - archetype: IOS-XE syntax change at 17.2' {
     BeforeAll {
         # A logical command whose CLI syntax changed at IOS-XE 17.2:
         #   pre-17.2 -> 'show foo old-syntax'   (max_version 17.1)
@@ -147,7 +147,7 @@ Describe 'Resolve-CommandVariant — archetype: IOS-XE syntax change at 17.2' {
     }
 }
 
-Describe 'Resolve-CommandVariant — hard-skip opt-out on unknown version' {
+Describe 'Resolve-CommandVariant - hard-skip opt-out on unknown version' {
     It 'returns a $null command (hard-skip) with a note when on_unknown=skip' {
         $member = [pscustomobject]@{
             variants   = @(
@@ -173,25 +173,25 @@ Describe 'Resolve-CommandVariant — hard-skip opt-out on unknown version' {
     }
 }
 
-Describe 'Resolve-CommandVariant — known version outside every declared range' {
+Describe 'Resolve-CommandVariant - known version outside every declared range' {
     It 'falls back to newest + note when no range covers the version' {
         $member = [pscustomobject]@{
             variants = @(
                 [pscustomobject]@{ command = 'show a'; min_version = '17.2'; max_version = '17.5' }
             )
         }
-        # 9.9 is below the only variant's min — no range matches.
+        # 9.9 is below the only variant's min - no range matches.
         $r = Resolve-CommandVariant -Platform 'cisco-switch-iosxe' -Member $member -DeviceVersion '9.9'
         $r.command | Should -Be 'show a'
         $r.note    | Should -Match 'matched no variant range'
     }
 }
 
-Describe 'Resolve-ProfileCommandList — version-guarded members via a synthetic catalog' {
+Describe 'Resolve-ProfileCommandList - version-guarded members via a synthetic catalog' {
     BeforeAll {
         # Minimal synthetic catalog exercising a version-guarded member in a feature
         # group, without disturbing the real command catalog (keeps the command-set
-        # sync triangle untouched — variants are DATA added later as discovered).
+        # sync triangle untouched - variants are DATA added later as discovered).
         $script:cat = @{
             'test-plat' = [ordered]@{
                 'base'    = @('show version', 'show running-config')

@@ -45,7 +45,7 @@ Describe 'Get-CollectionProfileCatalog' {
     }
 }
 
-Describe 'Resolve-ProfileCommandList — base is always present and non-removable' {
+Describe 'Resolve-ProfileCommandList - base is always present and non-removable' {
     It 'includes the whole base for any profile' {
         $r = Resolve-ProfileCommandList -Platform 'cisco-switch-iosxe' -ProfileName 'l2-switch'
         $r | Should -Contain 'show version'
@@ -68,7 +68,7 @@ Describe 'Resolve-ProfileCommandList — base is always present and non-removabl
     }
 }
 
-Describe 'Resolve-ProfileCommandList — profile composition' {
+Describe 'Resolve-ProfileCommandList - profile composition' {
     It 'full includes routing-tables-full but NOT routing-tables-lite' {
         $r = Resolve-ProfileCommandList -Platform 'cisco-switch-iosxe' -ProfileName 'full'
         $r | Should -Contain 'show ip route'
@@ -116,7 +116,7 @@ Describe 'Resolve-ProfileCommandList — profile composition' {
     }
 }
 
-Describe 'Resolve-ProfileCommandList — explicit groups + excludes/adds' {
+Describe 'Resolve-ProfileCommandList - explicit groups + excludes/adds' {
     It 'explicit groups take precedence over profile' {
         $r = Resolve-ProfileCommandList -Platform 'cisco-switch-iosxe' `
             -ProfileName 'full' -Groups @('neighbors')
@@ -152,7 +152,7 @@ Describe 'Resolve-ProfileCommandList — explicit groups + excludes/adds' {
     }
 }
 
-Describe 'Resolve-ProfileCommandList — error handling' {
+Describe 'Resolve-ProfileCommandList - error handling' {
     It 'throws on an unknown platform' {
         { Resolve-ProfileCommandList -Platform 'arista-eos' -ProfileName 'full' } |
             Should -Throw -ExpectedMessage '*Unknown platform*'
@@ -163,7 +163,7 @@ Describe 'Resolve-ProfileCommandList — error handling' {
     }
 }
 
-Describe 'Resolve-ProfileCommandList — wlc profiles' {
+Describe 'Resolve-ProfileCommandList - wlc profiles' {
     It 'wlc profile pulls wireless + neighbors on AireOS, plus base identity' {
         $r = Resolve-ProfileCommandList -Platform 'cisco-wlc-aireos' -ProfileName 'wlc'
         $r | Should -Contain 'show sysinfo'                  # base identity
@@ -191,16 +191,16 @@ Describe 'Profile/catalog consistency (typo guard)' {
 
         foreach ($pName in $profiles.Keys) {
             $sel = $profiles[$pName]
-            # The '*' sentinel means "all of this platform's groups" — nothing to typo-check.
+            # The '*' sentinel means "all of this platform's groups" - nothing to typo-check.
             if (($sel -is [string]) -and ($sel -eq '*')) { continue }
             foreach ($g in @($sel)) {
-                $known.Contains($g) | Should -BeTrue -Because "profile '$pName' references group '$g', which no platform catalog defines (likely a typo). Cross-platform-only groups such as routing-isis are fine — this only fails when NO platform defines the group at all."
+                $known.Contains($g) | Should -BeTrue -Because "profile '$pName' references group '$g', which no platform catalog defines (likely a typo). Cross-platform-only groups such as routing-isis are fine - this only fails when NO platform defines the group at all."
             }
         }
     }
 }
 
-Describe 'collector-only category — protected, non-removable, reserved' {
+Describe 'collector-only category - protected, non-removable, reserved' {
     # Synthetic catalog exercising the reserved 'collector-only' slot. Real
     # platform catalogs deliberately define NO collector-only members yet (asserted
     # below), so behavior is proven against a synthetic entry, mirroring how the
@@ -257,7 +257,7 @@ Describe 'collector-only category — protected, non-removable, reserved' {
         $featureIdx   | Should -BeGreaterThan $collectorIdx
     }
 
-    It 'is RESERVED — no real platform catalog defines collector-only members yet' {
+    It 'is RESERVED - no real platform catalog defines collector-only members yet' {
         $cat = Get-CommandGroupCatalog
         foreach ($plat in $cat.Keys) {
             # collector-only is either absent or (if ever pre-declared) empty; it must
@@ -270,7 +270,7 @@ Describe 'collector-only category — protected, non-removable, reserved' {
     }
 }
 
-Describe 'Base tightening — deliberate extras re-homed OUT of base' {
+Describe 'Base tightening - deliberate extras re-homed OUT of base' {
     BeforeAll { $script:cat = Get-CommandGroupCatalog }
 
     It 'router-iosxe: interface description / ip interface brief are collect-only, not base' {

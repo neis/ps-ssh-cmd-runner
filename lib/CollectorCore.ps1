@@ -63,7 +63,7 @@ function Test-IsAuthFailure {
     # Vendor-agnostic detection for devices (e.g. Cisco IOS) that never emit
     # "Permission denied" but do call SSH_ASKPASS for each password attempt.
     # Two or more read_passphrase calls means the first password was rejected
-    # and SSH requested a second attempt — definitive credential failure.
+    # and SSH requested a second attempt - definitive credential failure.
     $askpassCount = ([regex]::Matches($StdErr, 'read_passphrase')).Count
     if ($askpassCount -ge 2) { return $true }
 
@@ -102,7 +102,7 @@ function ConvertTo-CmdEchoEscaped {
 #   Juniper JunOS    :  user@hostname>  user@hostname#
 #   Palo Alto        :  user@hostname>  user@hostname#
 #   HP/Aruba         :  hostname#  hostname>
-#   Cisco WLC        :  (any text) >  — hostname from "show sysinfo" System Name field
+#   Cisco WLC        :  (any text) >  - hostname from "show sysinfo" System Name field
 #   Linux-based NOS  :  user@hostname:~$  [user@hostname ~]$
 # ---------------------------------------------
 function Get-HostnameFromPrompt {
@@ -140,7 +140,7 @@ function Get-HostnameFromPrompt {
 
         # Cisco WLC AireOS: hostname from "show sysinfo" output (System Name field).
         # WLC prompts like "(Cisco Controller) >", "(WLC7) >", etc. are not reliable
-        # sources of hostname — always extract from the System Name field instead.
+        # sources of hostname - always extract from the System Name field instead.
         if ($trimmed -match '^System Name\.+\s+(\S+)') {
             return $Matches[1]
         }
@@ -162,7 +162,7 @@ function ConvertTo-SafeFileName {
 # See docs/collection-plan.schema.md. Pure parse/normalize logic for the
 # structured JSON collection plan and the transitional CSV device list. Both
 # paths emit the SAME normalized device shape so downstream resolution is
-# input-agnostic. No file I/O here — callers pass raw text.
+# input-agnostic. No file I/O here - callers pass raw text.
 # =============================================================================
 
 # Read a property off a PSObject/hashtable, returning $Default when the object is
@@ -183,7 +183,7 @@ function Get-PlanProperty {
 
 # Coerce an arbitrary value (scalar, array, or $null) into a trimmed [string[]]
 # with empty entries dropped. Always returns an array (comma-unrolling is the
-# caller's job — pass a pre-split collection).
+# caller's job - pass a pre-split collection).
 function ConvertTo-StringArray {
     param($Value)
     if ($null -eq $Value) { return , ([string[]]@()) }
@@ -199,7 +199,7 @@ function ConvertTo-StringArray {
 #   2. else singular `credential_group` (non-empty)               -> one-element list
 #   3. else                                                       -> $Fallback
 # An explicitly-present `credential_groups` is authoritative for that level even
-# when empty (`[]` suppresses inheritance). This is pure data-shaping — the list
+# when empty (`[]` suppresses inheritance). This is pure data-shaping - the list
 # is CARRIED into the normalized shape, NOT consumed for auth (auth still uses a
 # single credential this phase; see docs/collection-plan.schema.md, C1 v2).
 function Get-EffectiveCredentialGroups {
@@ -234,10 +234,10 @@ function ConvertTo-NormalizedSshOptions {
 # Merge a device's ssh_options blob over a defaults ssh_options blob at the
 # SUB-FIELD level: each of the four fields is taken from the device when the
 # device supplies it (non-null), otherwise inherited from defaults. This is a
-# field-merge, NOT a wholesale replace — a device that sets only 'pty' still
+# field-merge, NOT a wholesale replace - a device that sets only 'pty' still
 # inherits the plan-wide kex/ciphers/host_key defaults. (Wholesale replace
 # silently drops the global crypto defaults, which fails connections to legacy
-# gear that relies on them — the C1 contract Reperio validates against.)
+# gear that relies on them - the C1 contract Reperio validates against.)
 # 'pty:false' is a real value (force-suppress PTY allocation), not "absent", so
 # it is preserved and not overwritten by the default's pty.
 function Merge-SshOptions {
@@ -456,19 +456,19 @@ function ConvertFrom-CollectionCsv {
 # group list) resolves to its command set. This replaces the flat, per-OS
 # commands/<os>.txt files as the source of truth for *what a profile collects*.
 #
-# Two group names are PROTECTED (always collected, NON-REMOVABLE — an exclude
+# Two group names are PROTECTED (always collected, NON-REMOVABLE - an exclude
 # naming one of their commands is ignored), for DIFFERENT reasons:
-#   'base'           — identity commands, running-config, and the per-platform
+#   'base'           - identity commands, running-config, and the per-platform
 #                      sentinel: what REPERIO needs to process/key the device.
-#   'collector-only' — commands the COLLECTOR itself needs to operate. These are
+#   'collector-only' - commands the COLLECTOR itself needs to operate. These are
 #                      collector-INTERNAL: they must NEVER be surfaced to operators
 #                      as tunable/collectable data (deliberately absent from any
-#                      platformCommands/Help mirror AND from COMMAND_MAP — the
+#                      platformCommands/Help mirror AND from COMMAND_MAP - the
 #                      THIRD legitimate sync-triangle divergence class, alongside
 #                      collect-only-forward and parse-only-backward). This is
 #                      distinct from 'collect-only-ops', which IS operator-facing
 #                      informative data (safe to prune). 'collector-only' is
-#                      RESERVED — currently no platform defines members for it; the
+#                      RESERVED - currently no platform defines members for it; the
 #                      slot + semantics ship now so a future collector-operational
 #                      command has a home a profile choice or exclude cannot drop.
 # Both are enforced in Resolve-ProfileCommandList.
@@ -514,7 +514,7 @@ function Get-CommandGroupCatalog {
             'arp'                 = @('show ip arp')
             'optics-transceiver'  = @('show interface transceiver')
             # 'show interface description' / 'show ip interface brief' are informative
-            # interface views, not needed to key the device — re-homed here out of base.
+            # interface views, not needed to key the device - re-homed here out of base.
             'collect-only-ops'    = @('show interface description', 'show ip interface brief', 'show license all', 'show adjacency detail', 'show ip nat translations', 'show ip access-lists', 'show logging last 100')
         }
         'cisco-switch-nxos'  = [ordered]@{
@@ -547,7 +547,7 @@ function Get-CommandGroupCatalog {
             'vrf'                 = @('show vrf all')
             'arp'                 = @('show arp', 'show arp vrf all')
             # 'show interfaces description' / 'show ipv4 interface brief' are informative
-            # interface views, not needed to key the device — re-homed here out of base.
+            # interface views, not needed to key the device - re-homed here out of base.
             'collect-only-ops'    = @('show interfaces description', 'show ipv4 interface brief', 'show mpls ldp neighbor', 'show platform', 'show redundancy summary', 'show environment', 'show logging')
         }
         'cisco-wlc-aireos'   = [ordered]@{
@@ -563,7 +563,7 @@ function Get-CommandGroupCatalog {
         'cisco-wlc-iosxe'    = [ordered]@{
             # 9800 identity additionally includes 'show wireless client summary'.
             # Hostname keys off 'show version' + 'show running-config' + the live prompt,
-            # so 'show startup-config | include hostname' is redundant for keying — it is
+            # so 'show startup-config | include hostname' is redundant for keying - it is
             # re-homed to 'collect-only-ops' (retained as informative, out of base).
             'base'             = @('show version', 'show inventory', 'show interface', 'show wireless client summary', 'show running-config')
             'neighbors'        = @('show cdp neighbors detail', 'show lldp neighbors detail')
@@ -612,7 +612,7 @@ function Get-CollectionProfileCatalog {
 #     a note is emitted); a per-command opt-out `on_unknown = 'skip'` hard-skips
 #     instead (for commands where guessing wrong is harmful).
 #
-# All logic here is pure and unit-tested; the resolver never writes/logs — it
+# All logic here is pure and unit-tested; the resolver never writes/logs - it
 # RETURNS a note string that the caller surfaces. Actual per-command variants are
 # DATA added to the catalog as discovered; the mechanism ships now, the archetype
 # (IOS-XE syntax change at 17.2) is exercised in the tests with a synthetic entry.
@@ -684,7 +684,7 @@ function Compare-FirmwareVersion {
         if ($x -lt $y) { return -1 }
         if ($x -gt $y) { return 1 }
     }
-    # Numeric components equal — an empty suffix is OLDER than any lettered rebuild.
+    # Numeric components equal - an empty suffix is OLDER than any lettered rebuild.
     if ($ta.Suffix -eq $tb.Suffix) { return 0 }
     if ($ta.Suffix -eq '') { return -1 }
     if ($tb.Suffix -eq '') { return 1 }
@@ -734,7 +734,7 @@ function Get-DeviceFirmwareVersion {
 
 # True when $Version satisfies a variant's [min_version, max_version] guard for a
 # platform (absent bound = open). A bound that fails to compare (unparseable) is
-# treated as NOT satisfied — conservative, since guard data should be well-formed.
+# treated as NOT satisfied - conservative, since guard data should be well-formed.
 function Test-VariantGuard {
     param(
         $Variant,
@@ -806,7 +806,7 @@ function Resolve-CommandVariant {
         [Parameter(Mandatory = $true)]$Member,
         [string]$DeviceVersion
     )
-    # A plain string is an unversioned command — always collected verbatim.
+    # A plain string is an unversioned command - always collected verbatim.
     if ($Member -is [string]) {
         return [PSCustomObject]@{ command = $Member; note = $null }
     }
@@ -854,7 +854,7 @@ function Resolve-CommandVariant {
         return [PSCustomObject]@{ command = [string](Get-VariantField $pick 'command'); note = $null }
     }
 
-    # Known version but outside every declared range — data gap; use newest + note.
+    # Known version but outside every declared range - data gap; use newest + note.
     return [PSCustomObject]@{
         command = $newestCmd
         note    = "Device version '$DeviceVersion' matched no variant range; defaulted to newest '$newestCmd'."
@@ -898,7 +898,7 @@ function Resolve-ProfileCommandList {
     if ($null -eq $AddCommands) { $AddCommands = @() }
 
     if (-not $Catalog.Contains($Platform)) {
-        throw "Unknown platform '$Platform' — no command-group catalog entry."
+        throw "Unknown platform '$Platform' - no command-group catalog entry."
     }
     $platGroups = $Catalog[$Platform]
 
@@ -907,7 +907,7 @@ function Resolve-ProfileCommandList {
     # two differ. Feature groups are everything else.
     $protectedGroupNames = @('base', 'collector-only')
 
-    # Feature (profile-selectable) group names this platform defines — everything
+    # Feature (profile-selectable) group names this platform defines - everything
     # that is not protected (canonical catalog order preserved).
     $featureNames = @($platGroups.Keys | Where-Object { $protectedGroupNames -notcontains $_ })
 
@@ -946,7 +946,7 @@ function Resolve-ProfileCommandList {
     $ordered = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    # Resolve the protected literals once (base, then collector-only) — reused for
+    # Resolve the protected literals once (base, then collector-only) - reused for
     # both the ordered set and the non-removable guard below. collector-only is
     # reserved (no platform defines it yet), so the inner loop is a no-op today but
     # correct the moment a member is added.
@@ -991,14 +991,14 @@ function Resolve-ProfileCommandList {
 # document shape); the per-command/connection instrumentation is gathered in
 # ssh-cmd-runner.ps1's collection loop and passed in.
 #
-# The `failure_category` classifier is the REFERENCE mapping — Reperio's Phase-3
+# The `failure_category` classifier is the REFERENCE mapping - Reperio's Phase-3
 # v2-summary parser (follow-up C2) reuses it as the canonical set, with a v1
 # free-text fallback for older bundles.
 # =============================================================================
 
 # Map a device's collection outcome (status + auth flag + free-text reason) to a
 # stable, remediation-oriented failure category, or $null when there is nothing
-# to remediate (Success / Warning — a Warning is a usable partial bundle). Pure
+# to remediate (Success / Warning - a Warning is a usable partial bundle). Pure
 # and deterministic. Categories:
 #   auth_failed | ssh_negotiation_failed | unreachable_ping |
 #   command_timeout | connection_refused | cancelled
@@ -1017,7 +1017,7 @@ function Get-FailureCategory {
 
     $err = if ($null -eq $ErrorText) { '' } else { $ErrorText }
 
-    # Credential rejection — the collector's own auth detector wins, then text.
+    # Credential rejection - the collector's own auth detector wins, then text.
     if ($AuthFailed) { return 'auth_failed' }
     if ($err -match 'Permission denied|Authentication failed|Too many authentication failures') {
         return 'auth_failed'
@@ -1029,7 +1029,7 @@ function Get-FailureCategory {
     # TCP-level refusal.
     if ($err -match 'Connection refused') { return 'connection_refused' }
 
-    # SSH transport negotiation (crypto/host-key mismatch) — legacy-gear signal.
+    # SSH transport negotiation (crypto/host-key mismatch) - legacy-gear signal.
     if ($err -match 'no matching (key exchange method|cipher|MAC|host key type)|Unable to negotiate|kex_exchange_identification') {
         return 'ssh_negotiation_failed'
     }
@@ -1045,7 +1045,7 @@ function Get-FailureCategory {
         return 'command_timeout'
     }
 
-    # Unclassified failure — keep the free-text reason, no forced category.
+    # Unclassified failure - keep the free-text reason, no forced category.
     return $null
 }
 

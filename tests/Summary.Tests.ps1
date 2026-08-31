@@ -9,7 +9,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot '../lib/CollectorCore.ps1')
 }
 
-Describe 'Get-FailureCategory — successful / partial runs have no category' {
+Describe 'Get-FailureCategory - successful / partial runs have no category' {
     It 'returns $null for Success' {
         Get-FailureCategory -Status 'Success' | Should -Be $null
     }
@@ -19,7 +19,7 @@ Describe 'Get-FailureCategory — successful / partial runs have no category' {
     }
 }
 
-Describe 'Get-FailureCategory — failure mapping' {
+Describe 'Get-FailureCategory - failure mapping' {
     It 'classifies operator cancellation' {
         Get-FailureCategory -Status 'Cancelled' | Should -Be 'cancelled'
     }
@@ -86,7 +86,7 @@ Describe 'New-CollectionSummaryDocument' {
     }
 }
 
-Describe 'plan_id round-trip — JSON input survives into the v2 summary (load-bearing contract)' {
+Describe 'plan_id round-trip - JSON input survives into the v2 summary (load-bearing contract)' {
     It 'echoes the input plan plan_id at the summary top level' {
         $json = @'
 {

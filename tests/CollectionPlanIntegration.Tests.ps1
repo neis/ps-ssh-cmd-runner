@@ -5,17 +5,17 @@
 #
 # ssh-cmd-runner.ps1 replaced flat commands/<os>.txt loading with catalog-based
 # resolution. The pure functions it drives (ConvertFrom-CollectionPlanJson /
-# ConvertFrom-CollectionCsv → normalized device; Resolve-ProfileCommandList) live in
+# ConvertFrom-CollectionCsv -> normalized device; Resolve-ProfileCommandList) live in
 # lib/CollectorCore.ps1 and are exercised here exactly as the script calls them. The
 # live SSH run itself is not unit-testable; these cover the input + resolution paths.
 #
 # NOTE: Resolve-ProfileCommandList already returns an array-protected [string[]]
-# (via the comma operator), so callers assign its result DIRECTLY — wrapping it in
+# (via the comma operator), so callers assign its result DIRECTLY - wrapping it in
 # @() would nest it as @(@(...)). The main script assigns it directly for the same
 # reason; these tests mirror that exactly.
 
 # Discovery-time data. Pester 5 evaluates `It -ForEach` at DISCOVERY, before any
-# BeforeAll runs, so the platform list must live at file (discovery) scope — not in
+# BeforeAll runs, so the platform list must live at file (discovery) scope - not in
 # BeforeAll, or the -ForEach expansion silently produces zero test cases.
 $Platforms = @('cisco-switch-iosxe', 'cisco-router-iosxe', 'cisco-switch-nxos',
     'cisco-router-iosxr', 'cisco-wlc-aireos', 'cisco-wlc-iosxe')
@@ -38,7 +38,7 @@ BeforeAll {
     }
 }
 
-Describe 'Behavior preservation — full profile is a superset of the old flat file' {
+Describe 'Behavior preservation - full profile is a superset of the old flat file' {
     It 'drops no command from <_> that the flat file collected' -ForEach $Platforms {
         $platform = $_
         $flat = script:Get-FlatCommandSet -Platform $platform
@@ -54,7 +54,7 @@ Describe 'Behavior preservation — full profile is a superset of the old flat f
     }
 }
 
-Describe 'Behavior preservation — intentionally-added base sentinels' {
+Describe 'Behavior preservation - intentionally-added base sentinels' {
     It 'adds the NX-OS route-summary sentinel under full' {
         $full = Resolve-ProfileCommandList -Platform 'cisco-switch-nxos' -ProfileName 'full'
         $full | Should -Contain 'show ip route summary'
@@ -69,7 +69,7 @@ Describe 'Behavior preservation — intentionally-added base sentinels' {
     }
 }
 
-Describe 'Behavior preservation — base-tightening re-homings still collected under full' {
+Describe 'Behavior preservation - base-tightening re-homings still collected under full' {
     It 'still collects re-homed IOS-XE router interface views' {
         $full = Resolve-ProfileCommandList -Platform 'cisco-router-iosxe' -ProfileName 'full'
         $full | Should -Contain 'show interface description'
@@ -86,7 +86,7 @@ Describe 'Behavior preservation — base-tightening re-homings still collected u
     }
 }
 
-Describe 'CSV input path — legacy device maps to full and loses nothing' {
+Describe 'CSV input path - legacy device maps to full and loses nothing' {
     It 'parses a CSV device to the full profile with plan_id null' {
         $csv = @(
             'IP,Category,OS'
@@ -131,7 +131,7 @@ Describe 'CSV input path — legacy device maps to full and loses nothing' {
     }
 }
 
-Describe 'JSON plan input path — plan_id round-trip and profile/groups resolution' {
+Describe 'JSON plan input path - plan_id round-trip and profile/groups resolution' {
     It 'parses plan_id and connect_ip and resolves a profile device' {
         $json = @'
 {

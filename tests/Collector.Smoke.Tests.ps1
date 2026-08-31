@@ -30,7 +30,7 @@ Describe 'Collector smoke checks' {
     }
 
     It 'the example config is valid JSON' {
-        # Note: the filename contains [ ] (glob metacharacters) — must use -LiteralPath.
+        # Note: the filename contains [ ] (glob metacharacters) - must use -LiteralPath.
         $configPath = Join-Path $RepoRoot 'Examples/[example] config.json'
         { Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json } |
             Should -Not -Throw
