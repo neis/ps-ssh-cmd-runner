@@ -2894,7 +2894,7 @@ if ($CollectionSummaryEnabled) {
 
         # (task 0d) Deterministic remediation category from the collector's own
         # signals (status + auth flag + reason). $null for Success/Warning.
-        $authFailedFlag = [bool](if ($r.PSObject.Properties.Name -contains 'AuthFailed') { $r.AuthFailed } else { $false })
+        $authFailedFlag = if ($r.PSObject.Properties.Name -contains 'AuthFailed') { [bool]$r.AuthFailed } else { $false }
         $failureCategory = Get-FailureCategory -Status $r.Status -AuthFailed $authFailedFlag -ErrorText $r.Error
 
         # (task 0d) Captured working connection params, present only on a successful
