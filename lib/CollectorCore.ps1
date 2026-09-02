@@ -591,7 +591,12 @@ function Get-CommandGroupCatalog {
 function Get-CollectionProfileCatalog {
     return @{
         'full'      = '*'
-        'l2-switch' = @('switching', 'power', 'optics-transceiver', 'neighbors')
+        # 'vrf' is included on EVERY switch/router profile (l2-switch too) so that a
+        # device which later gains VRF-lite still re-runs 'show vrf' and can be
+        # re-promoted by Reperio's capability tuning. It stays a normal excludable
+        # feature group: an L2 switch with no VRF support returns '% Invalid input'
+        # and Reperio prunes it per-device via exclude_commands after one response.
+        'l2-switch' = @('switching', 'power', 'optics-transceiver', 'neighbors', 'vrf')
         'l3-switch' = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-full', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
         'router'    = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-full', 'vrf', 'arp', 'optics-transceiver', 'neighbors')
         'bgp-heavy' = @('switching', 'routing-igp-ospf', 'routing-igp-eigrp', 'routing-bgp', 'routing-isis', 'routing-tables-lite', 'vrf', 'arp', 'optics-transceiver', 'neighbors')

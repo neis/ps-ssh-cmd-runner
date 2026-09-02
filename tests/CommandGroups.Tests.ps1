@@ -85,12 +85,13 @@ Describe 'Resolve-ProfileCommandList - profile composition' {
         $r | Should -Contain 'show license all'            # collect-only-ops
     }
 
-    It 'l2-switch excludes routing but keeps switching/power/optics/neighbors' {
+    It 'l2-switch excludes routing but keeps switching/power/optics/neighbors + vrf' {
         $r = Resolve-ProfileCommandList -Platform 'cisco-switch-iosxe' -ProfileName 'l2-switch'
         $r | Should -Contain 'show mac address-table'
         $r | Should -Contain 'show power inline'
         $r | Should -Contain 'show interface transceiver'
         $r | Should -Contain 'show cdp neighbors detail'
+        $r | Should -Contain 'show vrf'                       # vrf now on l2-switch (re-promotion)
         $r | Should -Not -Contain 'show ip bgp summary'
         $r | Should -Not -Contain 'show ip route'
     }
@@ -113,6 +114,43 @@ Describe 'Resolve-ProfileCommandList - profile composition' {
     It 'silently skips profile groups the platform does not define (isis on non-XR)' {
         # router profile names routing-isis, which cisco-router-iosxe lacks -> no throw.
         { Resolve-ProfileCommandList -Platform 'cisco-router-iosxe' -ProfileName 'router' } | Should -Not -Throw
+    }
+}
+
+Describe 'Resolve-ProfileCommandList - vrf collected on every switch/router profile' {
+    # Every switch/router profile must resolve the platform's vrf command so a
+    # device that later gains VRF-lite still re-runs 'show vrf' and can be
+    # re-promoted by Reperio. The vrf command literal is per-platform.
+    $vrfCases = @(
+        @{ Platform = 'cisco-switch-iosxe'; Vrf = 'show vrf' }
+        @{ Platform = 'cisco-router-iosxe'; Vrf = 'show vrf' }
+        @{ Platform = 'cisco-switch-nxos';  Vrf = 'show vrf' }
+        @{ Platform = 'cisco-router-iosxr'; Vrf = 'show vrf all' }
+    )
+
+    It "<Platform>: '<Vrf>' is present on full/l2-switch/l3-switch/router/bgp-heavy" -TestCases $vrfCases {
+        param($Platform, $Vrf)
+        foreach ($prof in @('full', 'l2-switch', 'l3-switch', 'router', 'bgp-heavy')) {
+            $r = Resolve-ProfileCommandList -Platform $Platform -ProfileName $prof
+            $r | Should -Contain $Vrf -Because "profile '$prof' on $Platform must collect vrf"
+        }
+    }
+
+    It 'vrf stays EXCLUDABLE (a normal feature group, not protected) - prunes per-device' {
+        # An L2 switch with no VRF support: Reperio drops 'show vrf' via exclude_commands
+        # after one '% Invalid input'. Since vrf is NOT base/collector-only, the exclude
+        # is honored (unlike a protected command).
+        $r = Resolve-ProfileCommandList -Platform 'cisco-switch-iosxe' -ProfileName 'l2-switch' `
+            -ExcludeCommands @('show vrf')
+        $r | Should -Not -Contain 'show vrf'
+    }
+
+    It 'wlc profile does NOT collect vrf (WLCs have no VRFs)' {
+        # Neither the wlc profile nor the wlc platform catalogs name/define a vrf group.
+        (Resolve-ProfileCommandList -Platform 'cisco-wlc-aireos' -ProfileName 'wlc') |
+            Should -Not -Contain 'show vrf'
+        (Resolve-ProfileCommandList -Platform 'cisco-wlc-iosxe' -ProfileName 'wlc') |
+            Should -Not -Contain 'show vrf'
     }
 }
 
