@@ -42,6 +42,16 @@ run_pwsh() {
 }
 
 lint() {
+  # Fail fast on any non-ASCII byte in the collector sources. A stray em-dash /
+  # smart-quote / arrow mis-decodes under Windows PowerShell 5.1 (ANSI) and breaks
+  # the script at runtime — and is INVISIBLE to the pwsh-7 container below, so it
+  # must be checked here on the raw bytes. Host-side grep (GNU grep -P).
+  if grep -rlP '[^\x00-\x7F]' \
+        "${REPO_DIR}/ssh-cmd-runner.ps1" "${REPO_DIR}/lib" "${REPO_DIR}/tests"; then
+    echo "ERROR: non-ASCII byte(s) found in the files listed above — WinPS 5.1 mis-decodes these. Convert to ASCII." >&2
+    exit 1
+  fi
+
   # Report ALL PSScriptAnalyzer findings, but FAIL the gate only on Error-severity or
   # 5.1-compatibility findings — the whole reason to lint a Windows PowerShell 5.1 script
   # inside a 7.x container. Pre-existing style/quality Warnings on the legacy monolith are
