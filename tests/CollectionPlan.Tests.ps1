@@ -165,8 +165,13 @@ Describe 'ConvertFrom-CollectionPlanJson' {
         (ConvertFrom-CollectionPlanJson -Json $json).schema_version | Should -Be 2
     }
 
-    It 'throws on an unsupported schema_version' {
+    It 'accepts schema_version 3 and echoes it' {
         $json = '{ "schema_version": 3, "devices": [ { "connect_ip": "1.2.3.4" } ] }'
+        (ConvertFrom-CollectionPlanJson -Json $json).schema_version | Should -Be 3
+    }
+
+    It 'throws on an unsupported schema_version' {
+        $json = '{ "schema_version": 4, "devices": [ { "connect_ip": "1.2.3.4" } ] }'
         { ConvertFrom-CollectionPlanJson -Json $json } | Should -Throw -ExpectedMessage '*schema_version*'
     }
 
@@ -194,6 +199,47 @@ Describe 'ConvertFrom-CollectionPlanJson' {
     It 'throws on a non-integer priority' {
         $json = '{ "devices": [ { "connect_ip": "1.2.3.4", "priority": "soon" } ] }'
         { ConvertFrom-CollectionPlanJson -Json $json } | Should -Throw -ExpectedMessage '*priority*'
+    }
+}
+
+Describe 'ConvertFrom-CollectionPlanJson - skip_ping (v3)' {
+    It 'parses skip_ping:true into the normalized device shape' {
+        $json = '{ "schema_version": 3, "devices": [ { "connect_ip": "1.2.3.4", "skip_ping": true } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].skip_ping | Should -BeTrue
+    }
+
+    It 'parses skip_ping:false as $false' {
+        $json = '{ "schema_version": 3, "devices": [ { "connect_ip": "1.2.3.4", "skip_ping": false } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].skip_ping | Should -BeFalse
+    }
+
+    It 'defaults skip_ping to $false when the field is absent' {
+        $json = '{ "devices": [ { "connect_ip": "1.2.3.4" } ] }'
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].skip_ping | Should -BeFalse
+    }
+
+    It 'defaults skip_ping to $false on the transitional CSV path' {
+        $csv = "IP,OS`n1.2.3.4,cisco-switch-iosxe"
+        $plan = ConvertFrom-CollectionCsv -CsvText $csv
+        $plan.devices[0].skip_ping | Should -BeFalse
+    }
+
+    It 'is per-device: only the flagged device gets skip_ping:true' {
+        $json = @'
+{
+  "schema_version": 3,
+  "devices": [
+    { "connect_ip": "10.0.0.1", "skip_ping": true },
+    { "connect_ip": "10.0.0.2" }
+  ]
+}
+'@
+        $plan = ConvertFrom-CollectionPlanJson -Json $json
+        $plan.devices[0].skip_ping | Should -BeTrue
+        $plan.devices[1].skip_ping | Should -BeFalse
     }
 }
 

@@ -158,7 +158,7 @@ function ConvertTo-SafeFileName {
 }
 
 # =============================================================================
-# COLLECTION PLAN INPUT (schema_version 1 and 2 accepted)
+# COLLECTION PLAN INPUT (schema_version 1, 2, and 3 accepted)
 # See docs/collection-plan.schema.md. Pure parse/normalize logic for the
 # structured JSON collection plan and the transitional CSV device list. Both
 # paths emit the SAME normalized device shape so downstream resolution is
@@ -265,7 +265,8 @@ function New-CollectionPlanDevice {
         $Priority = $null,
         [string[]]$CredentialGroups = @(),
         [string]$Category,
-        [string]$PlanId
+        [string]$PlanId,
+        [bool]$SkipPing = $false
     )
     $prio = $null
     if ($null -ne $Priority -and "$Priority".Trim() -ne '') {
@@ -299,16 +300,22 @@ function New-CollectionPlanDevice {
         credential_group = if ($CredentialGroups.Count -gt 0) { $CredentialGroups[0] } else { $null }
         category         = if ([string]::IsNullOrWhiteSpace($Category)) { $null } else { $Category.Trim() }
         plan_id          = if ([string]::IsNullOrWhiteSpace($PlanId)) { $null } else { $PlanId.Trim() }
+        # Per-device ICMP-precheck override (schema v3). $true instructs the
+        # collector to SKIP the pre-flight ping and attempt SSH anyway (for a
+        # device Reperio knows is online but sits behind an ICMP-filtering ACL).
+        # Absent in the plan -> $false (normal ping gate applies).
+        skip_ping        = $SkipPing
     }
 }
 
-# Parse a structured JSON collection plan (schema_version 1 or 2) into a
+# Parse a structured JSON collection plan (schema_version 1, 2, or 3) into a
 # normalized object: @{ schema_version; plan_id; devices = [normalized device] }.
-# schema_version is echoed as the parsed input version (1 or 2); v1 plans behave
-# identically to before (the v2 `credential_groups` list simply collapses from
-# the singular `credential_group` shorthand). Throws clear errors on malformed
-# JSON, an unsupported schema_version, a missing/empty devices array, or a device
-# missing connect_ip.
+# schema_version is echoed as the parsed input version (1, 2, or 3); v1/v2 plans
+# behave identically to before (the v2 `credential_groups` list simply collapses
+# from the singular `credential_group` shorthand; the v3 per-device `skip_ping`
+# defaults to $false when absent, so a v1/v2 plan keeps the normal ping gate).
+# Throws clear errors on malformed JSON, an unsupported schema_version, a
+# missing/empty devices array, or a device missing connect_ip.
 function ConvertFrom-CollectionPlanJson {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Json)
@@ -325,8 +332,8 @@ function ConvertFrom-CollectionPlanJson {
     if ($null -eq $doc) { throw "Collection plan JSON parsed to null." }
 
     $schemaVersion = Get-PlanProperty $doc 'schema_version' 1
-    if ("$schemaVersion" -ne '1' -and "$schemaVersion" -ne '2') {
-        throw "Unsupported collection plan schema_version '$schemaVersion' (this collector supports 1, 2)."
+    if ("$schemaVersion" -ne '1' -and "$schemaVersion" -ne '2' -and "$schemaVersion" -ne '3') {
+        throw "Unsupported collection plan schema_version '$schemaVersion' (this collector supports 1, 2, 3)."
     }
     $schemaVersionInt = [int]"$schemaVersion"
 
@@ -376,7 +383,8 @@ function ConvertFrom-CollectionPlanJson {
             -SshOptions (Merge-SshOptions $ssh $defaultSsh) `
             -Priority (Get-PlanProperty $d 'priority') `
             -CredentialGroups $credGroups `
-            -PlanId ([string]$planId)
+            -PlanId ([string]$planId) `
+            -SkipPing ([bool](Get-PlanProperty $d 'skip_ping' $false))
     }
 
     return [PSCustomObject]@{
@@ -983,16 +991,20 @@ function Resolve-ProfileCommandList {
 }
 
 # =============================================================================
-# COLLECTION SUMMARY v2 (task 0d)
+# COLLECTION SUMMARY v3 (task 0d + Phase 3c 2P-b)
 # schema_version 2 adds, per device: a remediation-oriented `failure_category`,
 # the captured working `connection` params, and per-command `duration`; and, at
-# the top level, an echo of the input `plan_id`. These pure helpers own the parts
-# that must be deterministic and unit-tested (the classifier and the top-level
-# document shape); the per-command/connection instrumentation is gathered in
-# ssh-cmd-runner.ps1's collection loop and passed in.
+# the top level, an echo of the input `plan_id`. schema_version 3 (Phase 3c 2P-b)
+# adds one `failure_category` member, `connect_timeout` (SSH attempted, host
+# unreachable at the TCP layer), split out of `unreachable_ping` (which now means
+# strictly "ICMP pre-check skipped it, SSH never attempted"). The document SHAPE
+# is unchanged v2->v3; only the classifier value domain grew. These pure helpers
+# own the parts that must be deterministic and unit-tested (the classifier and the
+# top-level document shape); the per-command/connection instrumentation is
+# gathered in ssh-cmd-runner.ps1's collection loop and passed in.
 #
 # The `failure_category` classifier is the REFERENCE mapping - Reperio's Phase-3
-# v2-summary parser (follow-up C2) reuses it as the canonical set, with a v1
+# summary parser (follow-up C2) reuses it as the canonical set, with a v1
 # free-text fallback for older bundles.
 # =============================================================================
 
@@ -1000,8 +1012,17 @@ function Resolve-ProfileCommandList {
 # stable, remediation-oriented failure category, or $null when there is nothing
 # to remediate (Success / Warning - a Warning is a usable partial bundle). Pure
 # and deterministic. Categories:
-#   auth_failed | ssh_negotiation_failed | unreachable_ping |
+#   auth_failed | ssh_negotiation_failed | unreachable_ping | connect_timeout |
 #   command_timeout | connection_refused | cancelled
+#
+# unreachable_ping vs connect_timeout - the load-bearing distinction (Phase 3c):
+#   unreachable_ping = the pre-SSH ICMP check failed and SSH was NEVER attempted
+#                      (Status 'Skipped') - no liveness signal at all.
+#   connect_timeout  = SSH WAS attempted but the host did not answer at the TCP
+#                      layer (no route / network unreachable / connect timed out /
+#                      host down) - "reached-for but unreachable". Distinct from a
+#                      TCP RST (connection_refused, a device that IS present) and
+#                      from command_timeout (a device that WAS reached).
 # An unrecognized failure returns $null so the caller keeps the free-text reason.
 function Get-FailureCategory {
     param(
@@ -1034,10 +1055,13 @@ function Get-FailureCategory {
         return 'ssh_negotiation_failed'
     }
 
-    # Connect-level unreachability (checked BEFORE the generic timeout below so a
-    # TCP "Connection timed out" is not misfiled as a command timeout).
+    # Connect-level unreachability: SSH WAS attempted but the host did not answer
+    # at the TCP layer. Distinct from unreachable_ping (SSH never attempted - the
+    # 'Skipped' branch above). Checked AFTER 'Connection refused' (an active RST is
+    # connection_refused, not a timeout) and BEFORE the generic command-timeout
+    # below so a TCP "Connection timed out" is not misfiled as a command timeout.
     if ($err -match 'No route to host|Network is unreachable|connect to host.*(Connection|Operation) timed out|Host is down') {
-        return 'unreachable_ping'
+        return 'connect_timeout'
     }
 
     # Device-side / prompt-level command timeout.
@@ -1061,7 +1085,7 @@ function New-CollectionSummaryDocument {
         [string]$Generated
     )
     return [ordered]@{
-        schema_version = 2
+        schema_version = 3
         plan_id        = if ([string]::IsNullOrWhiteSpace($PlanId)) { $null } else { $PlanId.Trim() }
         generated      = $Generated
         totals         = $Totals

@@ -30,10 +30,10 @@ Describe 'Get-FailureCategory - failure mapping' {
         Get-FailureCategory -Status 'Failed' -ErrorText 'Permission denied (publickey,password).' |
             Should -Be 'auth_failed'
     }
-    It 'classifies a skipped (ping) device as unreachable' {
+    It 'classifies a skipped (ping) device as unreachable_ping (SSH never attempted)' {
         Get-FailureCategory -Status 'Skipped' -ErrorText 'No ping response' | Should -Be 'unreachable_ping'
     }
-    It 'classifies a refused connection' {
+    It 'classifies a refused connection (active RST) as connection_refused, NOT connect_timeout' {
         Get-FailureCategory -Status 'Failed' -ErrorText 'ssh: connect to host 10.0.0.1 port 22: Connection refused' |
             Should -Be 'connection_refused'
     }
@@ -49,9 +49,21 @@ Describe 'Get-FailureCategory - failure mapping' {
         Get-FailureCategory -Status 'Failed' -ErrorText "Timed out waiting for device prompt after command 'show tech'." |
             Should -Be 'command_timeout'
     }
-    It 'classifies a connect-level timeout as unreachable, NOT a command timeout' {
+    It 'classifies a connect-level timeout (SSH attempted) as connect_timeout, NOT a command timeout' {
         Get-FailureCategory -Status 'Failed' -ErrorText 'ssh: connect to host 10.0.0.1 port 22: Connection timed out' |
-            Should -Be 'unreachable_ping'
+            Should -Be 'connect_timeout'
+    }
+    It 'classifies "No route to host" (SSH attempted) as connect_timeout, NOT unreachable_ping' {
+        Get-FailureCategory -Status 'Failed' -ErrorText 'ssh: connect to host 10.0.0.1 port 22: No route to host' |
+            Should -Be 'connect_timeout'
+    }
+    It 'classifies a down host (SSH attempted) as connect_timeout' {
+        Get-FailureCategory -Status 'Failed' -ErrorText 'ssh: connect to host 10.0.0.1 port 22: Host is down' |
+            Should -Be 'connect_timeout'
+    }
+    It 'keeps a device-side command timeout as command_timeout (not reclassified to connect_timeout)' {
+        Get-FailureCategory -Status 'Failed' -ErrorText 'Commands timed out during processing: show tech' |
+            Should -Be 'command_timeout'
     }
     It 'returns $null for an unrecognized failure (free-text reason kept by caller)' {
         Get-FailureCategory -Status 'Failed' -ErrorText 'some novel device-specific error' | Should -Be $null
@@ -63,10 +75,10 @@ Describe 'Get-FailureCategory - failure mapping' {
 }
 
 Describe 'New-CollectionSummaryDocument' {
-    It 'stamps schema_version 2 and echoes plan_id' {
+    It 'stamps schema_version 3 and echoes plan_id' {
         $doc = New-CollectionSummaryDocument -DevicesMap ([ordered]@{}) -Totals ([ordered]@{ total = 0 }) `
             -PlanId 'acme-001' -Generated '2026-08-17 12:00:00'
-        $doc.schema_version | Should -Be 2
+        $doc.schema_version | Should -Be 3
         $doc.plan_id        | Should -Be 'acme-001'
         $doc.generated      | Should -Be '2026-08-17 12:00:00'
     }
@@ -86,7 +98,7 @@ Describe 'New-CollectionSummaryDocument' {
     }
 }
 
-Describe 'plan_id round-trip - JSON input survives into the v2 summary (load-bearing contract)' {
+Describe 'plan_id round-trip - JSON input survives into the summary (load-bearing contract)' {
     It 'echoes the input plan plan_id at the summary top level' {
         $json = @'
 {
@@ -95,14 +107,14 @@ Describe 'plan_id round-trip - JSON input survives into the v2 summary (load-bea
   "devices": [ { "connect_ip": "10.1.1.1", "platform": "cisco-switch-iosxe", "profile": "full" } ]
 }
 '@
-        # Parse the plan (task 0a), then build the v2 summary (task 0d) exactly as the
+        # Parse the plan (task 0a), then build the summary (task 0d) exactly as the
         # collection loop does: the plan's plan_id must reach the summary top level.
         $plan = ConvertFrom-CollectionPlanJson -Json $json
         $plan.plan_id | Should -Be 'acme-refresh-2026-08-17-001'
 
         $doc = New-CollectionSummaryDocument -DevicesMap ([ordered]@{}) -Totals ([ordered]@{ total = 0 }) `
             -PlanId $plan.plan_id -Generated '2026-08-17 12:00:00'
-        $doc.schema_version | Should -Be 2
+        $doc.schema_version | Should -Be 3
         $doc.plan_id        | Should -Be 'acme-refresh-2026-08-17-001'
     }
 
