@@ -643,6 +643,9 @@ if (-not $CompressOnly) {
             Groups          = @($pd.groups)
             ExcludeCommands = @($pd.exclude_commands)
             AddCommands     = @($pd.add_commands)
+            # Per-device ICMP-precheck override (plan schema v3). When $true the
+            # collector skips the pre-flight ping and attempts SSH anyway.
+            SkipPing        = [bool]$pd.skip_ping
         }
     }
 
@@ -2379,7 +2382,11 @@ if ($MaxParallelJobs -le 1) {
         # Print table row prefix
         $null = Write-DeviceTableRow -DeviceNum $deviceNum -IP $ip -Category $device.Category -OS $os
 
-        if ($PingTest) {
+        # Per-device SkipPing (plan schema v3) suppresses the ICMP pre-check for a
+        # device Reperio knows is online but behind an ICMP-filtering ACL; the
+        # device still proceeds to the SSH attempt below. A genuine no-answer there
+        # classifies as connect_timeout (SSH attempted), NOT unreachable_ping.
+        if ($PingTest -and -not $device.SkipPing) {
             $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
             if (-not $pingResult) {
                 $skipResult = [PSCustomObject]@{
@@ -2496,6 +2503,7 @@ else {
                 Category         = $device.Category
                 OS               = $device.OS
                 ResolvedCommands = $device.ResolvedCommands
+                SkipPing         = $device.SkipPing
             })
     }
 
@@ -2586,8 +2594,11 @@ else {
             $totalLines++
             $lineIndex = $totalLines
 
-            # Pre-connection ping test
-            if ($PingTest) {
+            # Pre-connection ping test. Per-device SkipPing (plan schema v3)
+            # suppresses the ICMP pre-check (device is online but behind an
+            # ICMP-filtering ACL); the device still proceeds to the SSH attempt,
+            # where a genuine no-answer classifies as connect_timeout.
+            if ($PingTest -and -not $d.SkipPing) {
                 $pingResult = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue
                 if (-not $pingResult) {
                     $skipResult = [PSCustomObject]@{
