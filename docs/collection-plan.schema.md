@@ -1,4 +1,4 @@
-# Collection Plan input schema (v2)
+# Collection Plan input schema (v3)
 
 The **collection plan** is the structured JSON input the collector
 (`ssh-cmd-runner.ps1`) consumes to decide *which devices to reach* and *what to
@@ -9,8 +9,8 @@ collect from each*. It is a strict **superset** of the legacy CSV device list
 follow-up C1) but does not define it. Any change here bumps `schema_version` and
 must be flagged for the Reperio-side validator.
 
-- **Current version:** `schema_version = 2`. The collector **accepts both `1` and
-  `2`**; any other value is a hard error.
+- **Current version:** `schema_version = 3`. The collector **accepts `1`, `2`, and
+  `3`**; any other value is a hard error.
 - **Parsed by:** `ConvertFrom-CollectionPlanJson` (JSON) and
   `ConvertFrom-CollectionCsv` (transitional CSV) in `lib/CollectorCore.ps1`.
 - **Round-trip contract:** `plan_id` is a passthrough. The collector echoes it in
@@ -27,6 +27,23 @@ collector parses and **carries** the ordered list into its normalized device
 shape; it does **not** yet consume the list for multi-credential authentication —
 that is a deliberate later phase. This phase still authenticates with the single
 highest-priority credential (element 0).
+
+## What changed in v3
+
+v3 adds one **optional per-device boolean**, `skip_ping`. When `true`, the
+collector **skips the pre-flight ICMP ping** for that device and attempts SSH
+regardless of ping reachability. It is set by Reperio for devices it knows are
+online but that sit behind an ICMP-filtering ACL (so a bare ping would otherwise
+cause the collector to skip them). Absent / `false` ⇒ the normal ping gate
+applies. It has **no `defaults`-level form** — it is strictly per-device.
+
+The distinction this enables downstream: a device that is `skip_ping: true` but
+does not answer SSH at the TCP layer now reports the summary
+`failure_category = connect_timeout` ("SSH attempted, host unreachable"), as
+opposed to `unreachable_ping` ("ICMP pre-check skipped it, never attempted").
+See `docs/collection-summary.schema.md`.
+
+A v1/v2 plan (no `skip_ping` on any device) behaves **identically to before**.
 
 ---
 
@@ -66,6 +83,7 @@ Provides plan-wide fallbacks. A device-level field always wins over the default.
 | `priority`         | integer       | no       | Optional ordering hint (lower = earlier). Non-integer is a hard error. |
 | `credential_groups`| string[]      | no       | **Ordered** list of named credential sets to try, in attempt-priority order (element 0 first). Names resolve against the credential store (Windows Credential Manager keys); never inline secrets. |
 | `credential_group` | string        | no       | Back-compat one-element shorthand for `credential_groups`. If `credential_groups` is present it wins; otherwise a non-empty `credential_group` is treated as a single-element list. |
+| `skip_ping`        | boolean       | no       | **NEW in v3.** When `true`, skip the pre-flight ICMP ping for this device and attempt SSH anyway (device is online but behind an ICMP-filtering ACL). Absent / `false` ⇒ normal ping gate. No `defaults`-level form. A subsequent TCP no-answer classifies as `connect_timeout`, not `unreachable_ping`. |
 
 \* If a device supplies **neither** `profile` **nor** a non-empty `groups`, it
 falls back to `defaults.profile`, else the built-in default `full`.
@@ -246,7 +264,7 @@ change:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "plan_id": "acme-refresh-2026-08-17-001",
   "defaults": {
     "credential_groups": ["core-network", "core-network-legacy"],
@@ -257,7 +275,8 @@ change:
       "connect_ip": "10.1.1.1",
       "platform": "cisco-switch-iosxe",
       "profile": "l2-switch",
-      "priority": 10
+      "priority": 10,
+      "skip_ping": true
     },
     {
       "connect_ip": "10.1.1.2",
@@ -277,10 +296,14 @@ change:
 ```
 
 - The first device omits any credential form, so it **inherits**
-  `defaults.credential_groups` → `["core-network", "core-network-legacy"]`.
-- The second device's `credential_groups` → `["legacy-edge", "core-network"]`
-  overrides the defaults. Its `exclude_commands: ["show running-config"]` is
-  ignored because `show running-config` is a base command.
+  `defaults.credential_groups` → `["core-network", "core-network-legacy"]`. Its
+  `skip_ping: true` tells the collector to skip the ICMP pre-check and SSH to it
+  directly (Reperio knows it is online but behind an ICMP-filtering ACL); if SSH
+  then fails to answer at the TCP layer the device reports `connect_timeout`.
+- The second device omits `skip_ping` (⇒ `false`), so the normal ping gate
+  applies. Its `credential_groups` → `["legacy-edge", "core-network"]` overrides
+  the defaults, and its `exclude_commands: ["show running-config"]` is ignored
+  because `show running-config` is a base command.
 
 A v1 plan expressing the same intent with the singular shorthand
 (`"schema_version": 1`, `"credential_group": "core-network"`) is still accepted
